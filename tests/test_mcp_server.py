@@ -334,15 +334,19 @@ def test_empty_store_conventions(empty_project: Path) -> None:
 
 def test_mcp_setup_writes_config(tmp_path: Path) -> None:
     """mcp-setup creates .mcp.json in project root."""
-    from sentinel.cli.mcp_setup import _MCP_CONFIG
+    from sentinel.cli.mcp_setup import _sentinel_mcp_command
+
+    command = _sentinel_mcp_command()
+    sentinel_entry = {"command": command, "args": []}
+    config = {"mcpServers": {"sentinel": sentinel_entry}}
 
     mcp_json = tmp_path / ".mcp.json"
-    mcp_json.write_text(json.dumps(_MCP_CONFIG, indent=2) + "\n")
+    mcp_json.write_text(json.dumps(config, indent=2) + "\n")
 
-    config = json.loads(mcp_json.read_text())
-    assert "mcpServers" in config
-    assert "sentinel" in config["mcpServers"]
-    assert config["mcpServers"]["sentinel"]["command"] == "sentinel-mcp"
+    loaded = json.loads(mcp_json.read_text())
+    assert "mcpServers" in loaded
+    assert "sentinel" in loaded["mcpServers"]
+    assert "sentinel-mcp" in loaded["mcpServers"]["sentinel"]["command"]
 
 
 def test_mcp_setup_merges_existing(tmp_path: Path) -> None:

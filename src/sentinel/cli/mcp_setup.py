@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import typer
@@ -10,14 +11,22 @@ import typer
 from sentinel.cli import theme
 from sentinel.core.git import find_git_root
 
-_MCP_CONFIG = {
-    "mcpServers": {
-        "sentinel": {
-            "command": "sentinel-mcp",
-            "args": [],
-        }
-    }
-}
+
+def _sentinel_mcp_command() -> str:
+    """Return the best path to the sentinel-mcp binary.
+
+    If sentinel-mcp is on PATH, use the bare name.
+    Otherwise, resolve from the same venv as the running Python.
+    """
+    if shutil.which("sentinel-mcp"):
+        return "sentinel-mcp"
+    # Fall back to the absolute path from the current interpreter's venv
+    import sys
+
+    venv_bin = Path(sys.executable).parent / "sentinel-mcp"
+    if venv_bin.is_file():
+        return str(venv_bin)
+    return "sentinel-mcp"  # last resort: bare name
 
 
 def mcp_setup(
@@ -44,6 +53,11 @@ def mcp_setup(
 
     mcp_json = git_root / ".mcp.json"
 
+    sentinel_entry = {
+        "command": _sentinel_mcp_command(),
+        "args": [],
+    }
+
     # Merge with existing .mcp.json if present
     if mcp_json.exists():
         try:
@@ -51,11 +65,11 @@ def mcp_setup(
         except (json.JSONDecodeError, OSError):
             existing = {}
         servers = existing.get("mcpServers", {})
-        servers["sentinel"] = _MCP_CONFIG["mcpServers"]["sentinel"]
+        servers["sentinel"] = sentinel_entry
         existing["mcpServers"] = servers
         config = existing
     else:
-        config = _MCP_CONFIG
+        config = {"mcpServers": {"sentinel": sentinel_entry}}
 
     mcp_json.write_text(json.dumps(config, indent=2) + "\n")
     theme.success(f"Wrote {mcp_json}")
