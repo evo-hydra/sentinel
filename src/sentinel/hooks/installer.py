@@ -7,6 +7,8 @@ from pathlib import Path
 
 _SENTINEL_MARKER = "# --- SENTINEL HOOK ---"
 
+_VALID_SEVERITIES = frozenset({"critical", "high", "medium", "low", "info"})
+
 _PRE_COMMIT_TEMPLATE = """\
 #!/bin/sh
 {marker}
@@ -53,7 +55,12 @@ def install_hooks(
     installed: list[str] = []
 
     if pre_commit:
-        fail_on_flag = f" --fail-on {fail_on}" if fail_on else ""
+        fail_on_flag = ""
+        if fail_on:
+            # Validate fail_on before interpolating into shell script
+            if fail_on.lower() not in _VALID_SEVERITIES:
+                raise ValueError(f"Invalid fail_on severity: {fail_on!r}")
+            fail_on_flag = f" --fail-on {fail_on.lower()}"
         content = _PRE_COMMIT_TEMPLATE.format(marker=_SENTINEL_MARKER, fail_on_flag=fail_on_flag)
         _write_hook(hooks_dir / "pre-commit", content)
         installed.append("pre-commit")
@@ -119,8 +126,8 @@ def _remove_hook(path: Path) -> bool:
             break
 
     if sentinel_start is not None:
-        # Remove from marker to end (or next hook marker)
-        remaining = lines[:max(0, sentinel_start - 1)]
+        # Remove from marker line onward; keep everything before it
+        remaining = lines[:sentinel_start]
         remaining_text = "\n".join(remaining).strip()
 
         if remaining_text and remaining_text != "#!/bin/sh":

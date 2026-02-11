@@ -30,6 +30,27 @@ class Finding:
             "knowledge_id": self.knowledge_id,
         }
 
+    @classmethod
+    def from_dict(cls, data: dict) -> Finding:
+        """Reconstruct a Finding from its to_dict() output."""
+        try:
+            severity = Severity(data["severity"]) if "severity" in data else Severity.MEDIUM
+        except ValueError:
+            severity = Severity.MEDIUM
+        try:
+            finding_type = FindingType(data["type"]) if "type" in data else FindingType.CONVENTION_VIOLATION
+        except ValueError:
+            finding_type = FindingType.CONVENTION_VIOLATION
+        return cls(
+            file_path=data.get("file_path", ""),
+            line=data.get("line"),
+            severity=severity,
+            finding_type=finding_type,
+            message=data.get("message", ""),
+            suggestion=data.get("suggestion", ""),
+            knowledge_id=data.get("knowledge_id"),
+        )
+
 
 @dataclass
 class HuntReport:

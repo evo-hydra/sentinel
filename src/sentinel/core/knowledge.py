@@ -433,9 +433,14 @@ class KnowledgeStore:
 
     # --- Stats ---
 
+    _KNOWN_TABLES = frozenset(
+        {"conventions", "decisions", "pitfalls", "patterns", "hot_files", "co_changes"}
+    )
+
     def stats(self) -> dict[str, int]:
         s: dict[str, int] = {}
-        for table in ("conventions", "decisions", "pitfalls", "patterns", "hot_files", "co_changes"):
+        for table in self._KNOWN_TABLES:
+            # table names are from a hardcoded whitelist — safe to interpolate
             row = self.conn.execute(f"SELECT COUNT(*) as cnt FROM {table}").fetchone()
             s[table] = row["cnt"] if row else 0
         return s

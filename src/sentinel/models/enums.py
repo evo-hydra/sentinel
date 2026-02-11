@@ -46,6 +46,7 @@ class FindingType(str, Enum):
     HOT_FILE_WARNING = "hot_file_warning"
     CO_CHANGE_REMINDER = "co_change_reminder"
     NAMING_VIOLATION = "naming_violation"
+    LLM_FINDING = "llm_finding"
 
 
 class KnowledgeSource(str, Enum):

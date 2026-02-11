@@ -39,6 +39,15 @@ class SentinelConfig(BaseModel):
         ".java", ".rb", ".php", ".c", ".cpp", ".h",
     ])
 
+    # LLM settings
+    llm_provider: str = "ollama"  # ollama, anthropic, openai, gemini, grok
+    llm_model: str = "deepseek-coder:6.7b-instruct-q4_K_M"
+    llm_max_tokens: int = 4096
+    llm_timeout: float = 120.0
+    llm_max_file_size: int = 50_000  # skip files larger than 50KB
+    llm_ollama_url: str = "http://localhost:11434"
+    llm_workers: int = 2
+
     @classmethod
     def load(cls, sentinel_dir: Path) -> SentinelConfig:
         """Load config from .sentinel/config.yaml if it exists."""

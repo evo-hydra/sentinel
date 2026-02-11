@@ -152,7 +152,7 @@ def git_show(cwd: Path, sha: str, path: str | None = None) -> str:
     """Get content of a specific commit, optionally for a specific file."""
     args = ["git", "show", sha]
     if path:
-        args.append(f"-- {path}")
+        args.extend(["--", path])
     result = safe_git_command(args, cwd=cwd, check=False)
     return result.stdout
 
