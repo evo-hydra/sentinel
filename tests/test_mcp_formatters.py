@@ -11,7 +11,10 @@ from sentinel.mcp.formatters import (
     _filter_hot_files,
     _fragility_ratio,
     _is_noise_file,
+    _risk_score,
+    _sort_by_risk,
     _tier_label,
+    _top_co_change_partner,
     format_co_changes,
     format_conventions,
     format_decisions,
@@ -178,6 +181,67 @@ def test_filter_hot_files_custom_threshold() -> None:
     assert filtered[0].file_path == "a.py"
 
 
+# --- _risk_score ---
+
+
+def test_risk_score_basic() -> None:
+    # churn=50, fragility=0 (no bug fixes) => 50 * (0.5 + 0) = 25
+    hf = HotFile(file_path="a.py", change_count=10, bug_fix_count=0, churn_score=50)
+    assert _risk_score(hf) == pytest.approx(25.0)
+
+
+def test_risk_score_high_fragility() -> None:
+    # churn=50, fragility=1.0 (all bug fixes) => 50 * (0.5 + 1.0) = 75
+    hf = HotFile(file_path="a.py", change_count=10, bug_fix_count=10, churn_score=50)
+    assert _risk_score(hf) == pytest.approx(75.0)
+
+
+def test_risk_score_partial_fragility() -> None:
+    # churn=40, fragility=0.5 => 40 * (0.5 + 0.5) = 40
+    hf = HotFile(file_path="a.py", change_count=10, bug_fix_count=5, churn_score=40)
+    assert _risk_score(hf) == pytest.approx(40.0)
+
+
+# --- _sort_by_risk ---
+
+
+def test_sort_by_risk_ordering() -> None:
+    # File with higher risk should come first
+    low_risk = HotFile(file_path="low.py", change_count=10, bug_fix_count=0, churn_score=20)
+    high_risk = HotFile(file_path="high.py", change_count=10, bug_fix_count=8, churn_score=50)
+    mid_risk = HotFile(file_path="mid.py", change_count=10, bug_fix_count=3, churn_score=30)
+
+    sorted_files = _sort_by_risk([low_risk, high_risk, mid_risk])
+    assert sorted_files[0].file_path == "high.py"
+    assert sorted_files[-1].file_path == "low.py"
+
+
+# --- _top_co_change_partner ---
+
+
+def test_top_co_change_partner(populated_store: KnowledgeStore) -> None:
+    # src/auth.py co-changes with tests/test_auth.py (8) and src/api.py (4)
+    result = _top_co_change_partner("src/auth.py", populated_store)
+    assert "tests/test_auth.py" in result
+    assert "8" in result
+
+
+def test_top_co_change_partner_no_data(populated_store: KnowledgeStore) -> None:
+    result = _top_co_change_partner("nonexistent.py", populated_store)
+    assert result == ""
+
+
+def test_top_co_change_partner_skips_noise(tmp_path: Path) -> None:
+    """Co-change partner should skip noise files like .png."""
+    store = KnowledgeStore(tmp_path / "test.db")
+    store.open()
+    # Only partner is a noise file
+    store.upsert_co_change(CoChange(file_a="src/a.py", file_b="docs/logo.png", change_count=5))
+    result = _top_co_change_partner("src/a.py", store)
+    assert result == ""
+    store.close()
+
+
 # --- format_project_context ---
 
 
@@ -192,8 +256,9 @@ def test_project_context_full(populated_store: KnowledgeStore) -> None:
     assert "SQL injection" in result
     assert "SQLite" in result
     assert "src/auth.py" in result
-    # Tiered output: auth.py has churn 45 (Tier B), api.py has 13 (Tier C)
-    assert "Tier" in result or "Fragility" in result
+    # Risk and fragility columns
+    assert "Risk" in result
+    assert "Fragility" in result
 
 
 def test_project_context_empty(tmp_path: Path) -> None:
@@ -324,11 +389,11 @@ def test_decisions_empty() -> None:
     assert "No decisions" in output
 
 
-# --- format_hot_files (tiered) ---
+# --- format_hot_files (tiered with risk score) ---
 
 
 def test_hot_files_tiered() -> None:
-    """Hot files are grouped into A/B/C tiers with fragility ratio."""
+    """Hot files are grouped into A/B/C tiers with risk score and fragility."""
     hot_files = [
         HotFile(file_path="src/main.py", change_count=21, bug_fix_count=14, churn_score=63),
         HotFile(file_path="src/auth.py", change_count=20, bug_fix_count=5, revert_count=2, churn_score=45),
@@ -336,20 +401,72 @@ def test_hot_files_tiered() -> None:
     ]
     output = format_hot_files(hot_files)
     assert "## Hot Files" in output
-    # Tier A: main.py (63)
+    # Tier A: main.py (63) -> "Architecture Risk"
     assert "Tier A" in output
-    assert "Watchlist" in output
+    assert "Architecture Risk" in output
     assert "src/main.py" in output
-    # Tier B: auth.py (45)
+    # Tier B: auth.py (45) -> "Core Volatility"
     assert "Tier B" in output
+    assert "Core Volatility" in output
     assert "src/auth.py" in output
-    # Tier C: api.py (13)
+    # Tier C: api.py (13) -> "Worth Watching"
     assert "Tier C" in output
     assert "src/api.py" in output
-    # Fragility column exists
+    # Risk and Fragility columns
+    assert "Risk" in output
     assert "Fragility" in output
-    # main.py has 14/21 = 67% fragility, should be bolded (>= 50%)
-    assert "**67%**" in output
+
+
+def test_hot_files_risk_column() -> None:
+    """Risk score replaces raw churn in the output."""
+    # churn=63, fragility=14/21=0.667 => risk = 63 * (0.5 + 0.667) = 73.5 => 74
+    hot_files = [
+        HotFile(file_path="src/main.py", change_count=21, bug_fix_count=14, churn_score=63),
+    ]
+    output = format_hot_files(hot_files)
+    # Risk score should be ~74 (rounded)
+    assert "| 74 |" in output or "| 73 |" in output
+
+
+def test_hot_files_fragile_label() -> None:
+    """Files with fragility >= 50% get FRAGILE label."""
+    hot_files = [
+        HotFile(file_path="src/main.py", change_count=21, bug_fix_count=14, churn_score=63),
+    ]
+    output = format_hot_files(hot_files)
+    # 14/21 = 67% => FRAGILE
+    assert "FRAGILE" in output
+    assert "**67% FRAGILE**" in output
+
+
+def test_hot_files_no_fragile_label_below_50pct() -> None:
+    """Files with fragility < 50% do NOT get FRAGILE label in their row."""
+    hot_files = [
+        HotFile(file_path="src/auth.py", change_count=20, bug_fix_count=5, churn_score=45),
+    ]
+    output = format_hot_files(hot_files)
+    # The header note mentions "FRAGILE" as legend, but the data row should not
+    assert "25% FRAGILE" not in output
+    assert "| 25% |" in output
+
+
+def test_hot_files_with_co_change_partner(populated_store: KnowledgeStore) -> None:
+    """Tier A/B files show Likely Pair column when store is provided."""
+    hot_files = [
+        HotFile(file_path="src/auth.py", change_count=20, bug_fix_count=5, churn_score=45),
+    ]
+    output = format_hot_files(hot_files, store=populated_store)
+    assert "Likely Pair" in output
+    assert "tests/test_auth.py" in output
+
+
+def test_hot_files_tier_c_no_pair() -> None:
+    """Tier C files do NOT show Likely Pair column."""
+    hot_files = [
+        HotFile(file_path="src/api.py", change_count=10, bug_fix_count=1, churn_score=13),
+    ]
+    output = format_hot_files(hot_files)
+    assert "Likely Pair" not in output
 
 
 def test_hot_files_filters_noise() -> None:
@@ -382,12 +499,12 @@ def test_hot_files_empty() -> None:
 
 
 def test_hot_files_fragility_bolded_above_50pct() -> None:
-    """Files with >= 50% fragility ratio get bold formatting."""
+    """Files with >= 50% fragility ratio get bold + FRAGILE formatting."""
     hot_files = [
         HotFile(file_path="src/fragile.py", change_count=10, bug_fix_count=8, churn_score=34),
     ]
     output = format_hot_files(hot_files)
-    assert "**80%**" in output  # 8/10 = 80%, bolded
+    assert "**80% FRAGILE**" in output  # 8/10 = 80%, bolded with FRAGILE
 
 
 # --- format_co_changes ---

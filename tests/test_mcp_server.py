@@ -252,12 +252,12 @@ def test_tool_hot_files(sentinel_project: Path) -> None:
 
     store = _open_store(sentinel_project / ".sentinel")
     assert store is not None
-    hot_files = store.get_hot_files(limit=20)
-    output = format_hot_files(hot_files)
+    hot_files = store.get_hot_files(limit=200)
+    output = format_hot_files(hot_files, store=store)
     store.close()
 
     assert "src/auth.py" in output
-    assert "45" in output
+    assert "Risk" in output
 
 
 def test_tool_co_changes(sentinel_project: Path) -> None:

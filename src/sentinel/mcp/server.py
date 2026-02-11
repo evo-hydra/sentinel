@@ -166,17 +166,18 @@ def create_server() -> FastMCP:
 
     @mcp.tool()
     def sentinel_hot_files() -> str:
-        """List high-churn files that need extra review attention.
+        """List high-churn files ranked by risk score (churn x fragility).
 
-        Files with frequent changes, bug fixes, or reverts get higher churn scores.
-        Prioritize review attention on these files.
+        Files with frequent changes, bug fixes, or reverts are tiered by risk.
+        Tier A/B files include their top co-change partner so you know what
+        else to check when editing them.
         """
         store = _open_store()
         if store is None:
             return _no_sentinel_msg()
         try:
-            hot_files = store.get_hot_files(limit=20)
-            return format_hot_files(hot_files)
+            hot_files = store.get_hot_files(limit=200)
+            return format_hot_files(hot_files, store=store)
         finally:
             store.close()
 

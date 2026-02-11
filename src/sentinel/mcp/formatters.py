@@ -6,7 +6,11 @@ optimized for LLM consumption — concise, structured, scannable.
 
 from __future__ import annotations
 
-from sentinel.core.knowledge import KnowledgeStore
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from sentinel.core.knowledge import KnowledgeStore
+
 from sentinel.models.knowledge import CoChange, Convention, Decision, HotFile, Pitfall
 
 # Extensions to exclude from hot file output (noise, not signal)
@@ -15,6 +19,9 @@ _NOISE_EXTENSIONS = frozenset({
     ".lock", ".sum",                                             # lock files
     ".map", ".min.js", ".min.css",                               # build artifacts
 })
+
+# Tier A/B row cap — nobody reads 200 lines before coffee
+_TIER_AB_MAX_ROWS = 25
 
 
 def _is_noise_file(path: str) -> bool:
@@ -28,6 +35,16 @@ def _fragility_ratio(hf: HotFile) -> float:
     if hf.change_count == 0:
         return 0.0
     return hf.bug_fix_count / hf.change_count
+
+
+def _risk_score(hf: HotFile) -> float:
+    """Composite risk: churn weighted by fragility.
+
+    risk = churn * (0.5 + fragility) where fragility is 0..1.
+    High churn + high fragility rockets upward.
+    Low fragility files get halved but not zeroed.
+    """
+    return hf.churn_score * (0.5 + _fragility_ratio(hf))
 
 
 def _tier_label(churn: float) -> str:
@@ -47,6 +64,29 @@ def _filter_hot_files(hot_files: list[HotFile], min_churn: float = 10.0) -> list
         hf for hf in hot_files
         if hf.churn_score >= min_churn and not _is_noise_file(hf.file_path)
     ]
+
+
+def _sort_by_risk(files: list[HotFile]) -> list[HotFile]:
+    """Sort files by risk score DESC, then churn DESC, then fragility DESC."""
+    return sorted(
+        files,
+        key=lambda hf: (_risk_score(hf), hf.churn_score, _fragility_ratio(hf)),
+        reverse=True,
+    )
+
+
+def _top_co_change_partner(
+    file_path: str, store: KnowledgeStore,
+) -> str:
+    """Return the top co-change partner for a file, or empty string."""
+    co_changes = store.get_co_changes(file_path, min_count=2)
+    for cc in co_changes:
+        other = cc.file_b if cc.file_a == file_path else cc.file_a
+        # Skip noise files and low-signal partners
+        if _is_noise_file(other):
+            continue
+        return f"`{other}` ({cc.change_count})"
+    return ""
 
 
 def format_project_context(store: KnowledgeStore) -> str:
@@ -100,23 +140,24 @@ def format_project_context(store: KnowledgeStore) -> str:
             parts.append(line)
         parts.append("")
 
-    # Hot files — tiered, filtered, with fragility ratio
+    # Hot files — tiered, risk-sorted, top 15 for context summary
     all_hot = store.get_hot_files(limit=200)
-    hot_files = _filter_hot_files(all_hot)
+    hot_files = _sort_by_risk(_filter_hot_files(all_hot))
     if hot_files:
         parts.append("## Hot Files\n")
         parts.append(
-            "| Tier | File | Changes | Bug Fixes | Fragility | Churn |"
+            "| File | Risk | Fragility | Likely Pair |"
         )
         parts.append(
-            "|------|------|---------|-----------|-----------|-------|"
+            "|------|------|-----------|-------------|"
         )
         for hf in hot_files[:15]:
-            tier = _tier_label(hf.churn_score)
+            risk = round(_risk_score(hf))
             frag = _fragility_ratio(hf)
+            frag_str = f"**{frag:.0%}**" if frag >= 0.5 else f"{frag:.0%}"
+            pair = _top_co_change_partner(hf.file_path, store)
             parts.append(
-                f"| **{tier}** | `{hf.file_path}` | {hf.change_count} | "
-                f"{hf.bug_fix_count} | {frag:.0%} | {hf.churn_score:.0f} |"
+                f"| `{hf.file_path}` | {risk} | {frag_str} | {pair} |"
             )
         remaining = len(hot_files) - 15
         if remaining > 0:
@@ -204,42 +245,54 @@ def format_decisions(decisions: list[Decision]) -> str:
     return "\n".join(parts)
 
 
-def format_hot_files(hot_files: list[HotFile]) -> str:
-    """Format hot files as a tiered markdown table with fragility ratio.
+def format_hot_files(
+    hot_files: list[HotFile],
+    store: KnowledgeStore | None = None,
+) -> str:
+    """Format hot files as tiered tables with risk score and co-change pairs.
 
     Filters out noise (images, lock files, etc.) and files with churn < 10.
     Groups into tiers: A (>= 50), B (>= 20), C (>= 10).
+    Sorts within each tier by risk score (churn * (0.5 + fragility)).
+    Tier A/B include top co-change partner when store is provided.
+    Files with fragility >= 50% are marked FRAGILE.
     """
     filtered = _filter_hot_files(hot_files)
     if not filtered:
         return "No hot files found (all files below churn threshold of 10)."
 
-    tier_a = [hf for hf in filtered if hf.churn_score >= 50]
-    tier_b = [hf for hf in filtered if 20 <= hf.churn_score < 50]
-    tier_c = [hf for hf in filtered if 10 <= hf.churn_score < 20]
+    tier_a = _sort_by_risk([hf for hf in filtered if hf.churn_score >= 50])
+    tier_b = _sort_by_risk([hf for hf in filtered if 20 <= hf.churn_score < 50])
+    tier_c = _sort_by_risk([hf for hf in filtered if 10 <= hf.churn_score < 20])
 
     parts: list[str] = ["## Hot Files\n"]
+    parts.append("*FRAGILE = more than half of all changes are bug fixes.*\n")
 
     if tier_a:
         parts.append(
-            f"### Tier A — Watchlist ({len(tier_a)} files, churn >= 50)\n"
+            f"### Tier A — Architecture Risk ({len(tier_a)} files)\n"
         )
-        parts.append("*These files define your architecture risk. Treat changes with extra care.*\n")
-        parts.append(_hot_file_table(tier_a))
+        shown = min(len(tier_a), _TIER_AB_MAX_ROWS)
+        parts.append(_hot_file_table(tier_a[:shown], store))
+        if len(tier_a) > shown:
+            parts.append(f"\n*...and {len(tier_a) - shown} more Tier A files.*")
         parts.append("")
 
     if tier_b:
         parts.append(
-            f"### Tier B — Core Volatility ({len(tier_b)} files, churn >= 20)\n"
+            f"### Tier B — Core Volatility ({len(tier_b)} files)\n"
         )
-        parts.append(_hot_file_table(tier_b))
+        shown = min(len(tier_b), _TIER_AB_MAX_ROWS)
+        parts.append(_hot_file_table(tier_b[:shown], store))
+        if len(tier_b) > shown:
+            parts.append(f"\n*...and {len(tier_b) - shown} more Tier B files.*")
         parts.append("")
 
     if tier_c:
         parts.append(
-            f"### Tier C — Worth Watching ({len(tier_c)} files, churn >= 10)\n"
+            f"### Tier C — Worth Watching ({len(tier_c)} files)\n"
         )
-        parts.append(_hot_file_table(tier_c))
+        parts.append(_hot_file_table(tier_c, None))  # no co-change for Tier C
         parts.append("")
 
     skipped = len(hot_files) - len(filtered)
@@ -251,25 +304,33 @@ def format_hot_files(hot_files: list[HotFile]) -> str:
     return "\n".join(parts)
 
 
-def _hot_file_table(files: list[HotFile]) -> str:
-    """Render a hot file table with fragility ratio."""
+def _hot_file_table(
+    files: list[HotFile],
+    store: KnowledgeStore | None = None,
+) -> str:
+    """Render a hot file table with risk score, fragility, and optional co-change partner."""
+    show_pair = store is not None
     lines: list[str] = []
-    lines.append(
-        "| File | Changes | Bug Fixes | Fragility | Churn |"
-    )
-    lines.append(
-        "|------|---------|-----------|-----------|-------|"
-    )
+
+    if show_pair:
+        lines.append("| File | Risk | Fragility | Likely Pair |")
+        lines.append("|------|------|-----------|-------------|")
+    else:
+        lines.append("| File | Risk | Fragility |")
+        lines.append("|------|------|-----------|")
+
     for hf in files:
+        risk = round(_risk_score(hf))
         frag = _fragility_ratio(hf)
-        frag_str = f"{frag:.0%}"
-        # Flag extreme fragility
-        if frag >= 0.5:
-            frag_str = f"**{frag:.0%}**"
-        lines.append(
-            f"| `{hf.file_path}` | {hf.change_count} | "
-            f"{hf.bug_fix_count} | {frag_str} | {hf.churn_score:.0f} |"
-        )
+        frag_str = f"**{frag:.0%} FRAGILE**" if frag >= 0.5 else f"{frag:.0%}"
+
+        if show_pair:
+            assert store is not None
+            pair = _top_co_change_partner(hf.file_path, store)
+            lines.append(f"| `{hf.file_path}` | {risk} | {frag_str} | {pair} |")
+        else:
+            lines.append(f"| `{hf.file_path}` | {risk} | {frag_str} |")
+
     return "\n".join(lines)
 
 
