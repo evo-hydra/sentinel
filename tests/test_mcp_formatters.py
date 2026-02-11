@@ -8,6 +8,10 @@ import pytest
 
 from sentinel.core.knowledge import KnowledgeStore
 from sentinel.mcp.formatters import (
+    _filter_hot_files,
+    _fragility_ratio,
+    _is_noise_file,
+    _tier_label,
     format_co_changes,
     format_conventions,
     format_decisions,
@@ -109,6 +113,71 @@ def populated_store(tmp_path: Path) -> KnowledgeStore:
     store.close()
 
 
+# --- Helper functions ---
+
+
+def test_is_noise_file() -> None:
+    assert _is_noise_file("docs/images/screenshot.png") is True
+    assert _is_noise_file("assets/logo.SVG") is True
+    assert _is_noise_file("package-lock.json") is False  # .json is not noise
+    assert _is_noise_file("yarn.lock") is True
+    assert _is_noise_file("src/auth.py") is False
+    assert _is_noise_file("bundle.min.js") is True
+    assert _is_noise_file("style.min.css") is True
+
+
+def test_fragility_ratio() -> None:
+    # 5 bug fixes out of 20 changes = 25%
+    hf = HotFile(file_path="a.py", change_count=20, bug_fix_count=5)
+    assert _fragility_ratio(hf) == pytest.approx(0.25)
+
+    # 14 bug fixes out of 21 changes = 67%
+    hf2 = HotFile(file_path="b.py", change_count=21, bug_fix_count=14)
+    assert _fragility_ratio(hf2) == pytest.approx(14 / 21)
+
+    # Zero changes = 0 (no division by zero)
+    hf3 = HotFile(file_path="c.py", change_count=0, bug_fix_count=0)
+    assert _fragility_ratio(hf3) == 0.0
+
+
+def test_tier_label() -> None:
+    assert _tier_label(78) == "A"
+    assert _tier_label(50) == "A"
+    assert _tier_label(45) == "B"
+    assert _tier_label(20) == "B"
+    assert _tier_label(15) == "C"
+    assert _tier_label(10) == "C"
+    assert _tier_label(9) == ""
+    assert _tier_label(0) == ""
+
+
+def test_filter_hot_files() -> None:
+    files = [
+        HotFile(file_path="src/auth.py", churn_score=45),
+        HotFile(file_path="src/api.py", churn_score=13),
+        HotFile(file_path="docs/logo.png", churn_score=20),  # noise: image
+        HotFile(file_path="package-lock.json", churn_score=5),  # below threshold
+        HotFile(file_path="src/utils.py", churn_score=3),  # below threshold
+    ]
+    filtered = _filter_hot_files(files)
+    paths = [f.file_path for f in filtered]
+    assert "src/auth.py" in paths
+    assert "src/api.py" in paths
+    assert "docs/logo.png" not in paths  # filtered: noise
+    assert "package-lock.json" not in paths  # filtered: below threshold
+    assert "src/utils.py" not in paths  # filtered: below threshold
+
+
+def test_filter_hot_files_custom_threshold() -> None:
+    files = [
+        HotFile(file_path="a.py", churn_score=25),
+        HotFile(file_path="b.py", churn_score=15),
+    ]
+    filtered = _filter_hot_files(files, min_churn=20)
+    assert len(filtered) == 1
+    assert filtered[0].file_path == "a.py"
+
+
 # --- format_project_context ---
 
 
@@ -123,6 +192,8 @@ def test_project_context_full(populated_store: KnowledgeStore) -> None:
     assert "SQL injection" in result
     assert "SQLite" in result
     assert "src/auth.py" in result
+    # Tiered output: auth.py has churn 45 (Tier B), api.py has 13 (Tier C)
+    assert "Tier" in result or "Fragility" in result
 
 
 def test_project_context_empty(tmp_path: Path) -> None:
@@ -253,24 +324,70 @@ def test_decisions_empty() -> None:
     assert "No decisions" in output
 
 
-# --- format_hot_files ---
+# --- format_hot_files (tiered) ---
 
 
-def test_hot_files_table() -> None:
+def test_hot_files_tiered() -> None:
+    """Hot files are grouped into A/B/C tiers with fragility ratio."""
     hot_files = [
+        HotFile(file_path="src/main.py", change_count=21, bug_fix_count=14, churn_score=63),
         HotFile(file_path="src/auth.py", change_count=20, bug_fix_count=5, revert_count=2, churn_score=45),
-        HotFile(file_path="src/api.py", change_count=10, bug_fix_count=1, revert_count=0, churn_score=13),
+        HotFile(file_path="src/api.py", change_count=10, bug_fix_count=1, churn_score=13),
     ]
     output = format_hot_files(hot_files)
     assert "## Hot Files" in output
+    # Tier A: main.py (63)
+    assert "Tier A" in output
+    assert "Watchlist" in output
+    assert "src/main.py" in output
+    # Tier B: auth.py (45)
+    assert "Tier B" in output
     assert "src/auth.py" in output
-    assert "45" in output
-    assert "Churn score" in output
+    # Tier C: api.py (13)
+    assert "Tier C" in output
+    assert "src/api.py" in output
+    # Fragility column exists
+    assert "Fragility" in output
+    # main.py has 14/21 = 67% fragility, should be bolded (>= 50%)
+    assert "**67%**" in output
+
+
+def test_hot_files_filters_noise() -> None:
+    """Noise files (images, lock files) are excluded."""
+    hot_files = [
+        HotFile(file_path="src/auth.py", change_count=20, bug_fix_count=5, churn_score=45),
+        HotFile(file_path="docs/screenshot.png", change_count=10, churn_score=30),
+        HotFile(file_path="yarn.lock", change_count=15, churn_score=25),
+    ]
+    output = format_hot_files(hot_files)
+    assert "src/auth.py" in output
+    assert "screenshot.png" not in output
+    assert "yarn.lock" not in output
+    assert "omitted" in output
+
+
+def test_hot_files_filters_low_churn() -> None:
+    """Files below churn threshold are excluded."""
+    hot_files = [
+        HotFile(file_path="src/utils.py", change_count=3, churn_score=5),
+        HotFile(file_path="README.md", change_count=1, churn_score=1),
+    ]
+    output = format_hot_files(hot_files)
+    assert "below churn threshold" in output
 
 
 def test_hot_files_empty() -> None:
     output = format_hot_files([])
     assert "No hot files" in output
+
+
+def test_hot_files_fragility_bolded_above_50pct() -> None:
+    """Files with >= 50% fragility ratio get bold formatting."""
+    hot_files = [
+        HotFile(file_path="src/fragile.py", change_count=10, bug_fix_count=8, churn_score=34),
+    ]
+    output = format_hot_files(hot_files)
+    assert "**80%**" in output  # 8/10 = 80%, bolded
 
 
 # --- format_co_changes ---

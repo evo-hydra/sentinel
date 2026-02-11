@@ -9,6 +9,45 @@ from __future__ import annotations
 from sentinel.core.knowledge import KnowledgeStore
 from sentinel.models.knowledge import CoChange, Convention, Decision, HotFile, Pitfall
 
+# Extensions to exclude from hot file output (noise, not signal)
+_NOISE_EXTENSIONS = frozenset({
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",  # images
+    ".lock", ".sum",                                             # lock files
+    ".map", ".min.js", ".min.css",                               # build artifacts
+})
+
+
+def _is_noise_file(path: str) -> bool:
+    """Return True if a file path is likely noise for hot-file analysis."""
+    lower = path.lower()
+    return any(lower.endswith(ext) for ext in _NOISE_EXTENSIONS)
+
+
+def _fragility_ratio(hf: HotFile) -> float:
+    """Bug-fix ratio: what fraction of changes to this file are bug fixes."""
+    if hf.change_count == 0:
+        return 0.0
+    return hf.bug_fix_count / hf.change_count
+
+
+def _tier_label(churn: float) -> str:
+    """Classify a hot file into a tier based on churn score."""
+    if churn >= 50:
+        return "A"
+    if churn >= 20:
+        return "B"
+    if churn >= 10:
+        return "C"
+    return ""
+
+
+def _filter_hot_files(hot_files: list[HotFile], min_churn: float = 10.0) -> list[HotFile]:
+    """Filter out noise files and low-churn entries."""
+    return [
+        hf for hf in hot_files
+        if hf.churn_score >= min_churn and not _is_noise_file(hf.file_path)
+    ]
+
 
 def format_project_context(store: KnowledgeStore) -> str:
     """Full project intelligence summary for session priming.
@@ -23,7 +62,7 @@ def format_project_context(store: KnowledgeStore) -> str:
     parts.append(
         f"Knowledge base: {stats['conventions']} conventions, "
         f"{stats['decisions']} decisions, {stats['pitfalls']} pitfalls, "
-        f"{stats['patterns']} patterns, {stats['hot_files']} hot files, "
+        f"{stats['patterns']} patterns, {stats['hot_files']} tracked files, "
         f"{stats['co_changes']} co-change pairs.\n"
     )
 
@@ -61,17 +100,27 @@ def format_project_context(store: KnowledgeStore) -> str:
             parts.append(line)
         parts.append("")
 
-    # Hot files (top 10)
-    hot_files = store.get_hot_files(limit=10)
+    # Hot files — tiered, filtered, with fragility ratio
+    all_hot = store.get_hot_files(limit=200)
+    hot_files = _filter_hot_files(all_hot)
     if hot_files:
-        parts.append("## Hot Files (high churn)\n")
-        parts.append("| File | Changes | Bug Fixes | Reverts | Churn Score |")
-        parts.append("|------|---------|-----------|---------|-------------|")
-        for hf in hot_files:
+        parts.append("## Hot Files\n")
+        parts.append(
+            "| Tier | File | Changes | Bug Fixes | Fragility | Churn |"
+        )
+        parts.append(
+            "|------|------|---------|-----------|-----------|-------|"
+        )
+        for hf in hot_files[:15]:
+            tier = _tier_label(hf.churn_score)
+            frag = _fragility_ratio(hf)
             parts.append(
-                f"| `{hf.file_path}` | {hf.change_count} | "
-                f"{hf.bug_fix_count} | {hf.revert_count} | {hf.churn_score:.0f} |"
+                f"| **{tier}** | `{hf.file_path}` | {hf.change_count} | "
+                f"{hf.bug_fix_count} | {frag:.0%} | {hf.churn_score:.0f} |"
             )
+        remaining = len(hot_files) - 15
+        if remaining > 0:
+            parts.append(f"\n*...and {remaining} more files with churn >= 10.*")
         parts.append("")
 
     return "\n".join(parts)
@@ -156,26 +205,72 @@ def format_decisions(decisions: list[Decision]) -> str:
 
 
 def format_hot_files(hot_files: list[HotFile]) -> str:
-    """Format hot files as a markdown table."""
-    if not hot_files:
-        return "No hot files found."
+    """Format hot files as a tiered markdown table with fragility ratio.
 
-    parts: list[str] = ["## Hot Files (high churn)\n"]
-    parts.append("| File | Changes | Bug Fixes | Reverts | Churn Score |")
-    parts.append("|------|---------|-----------|---------|-------------|")
-    for hf in hot_files:
+    Filters out noise (images, lock files, etc.) and files with churn < 10.
+    Groups into tiers: A (>= 50), B (>= 20), C (>= 10).
+    """
+    filtered = _filter_hot_files(hot_files)
+    if not filtered:
+        return "No hot files found (all files below churn threshold of 10)."
+
+    tier_a = [hf for hf in filtered if hf.churn_score >= 50]
+    tier_b = [hf for hf in filtered if 20 <= hf.churn_score < 50]
+    tier_c = [hf for hf in filtered if 10 <= hf.churn_score < 20]
+
+    parts: list[str] = ["## Hot Files\n"]
+
+    if tier_a:
         parts.append(
-            f"| `{hf.file_path}` | {hf.change_count} | "
-            f"{hf.bug_fix_count} | {hf.revert_count} | {hf.churn_score:.0f} |"
+            f"### Tier A — Watchlist ({len(tier_a)} files, churn >= 50)\n"
+        )
+        parts.append("*These files define your architecture risk. Treat changes with extra care.*\n")
+        parts.append(_hot_file_table(tier_a))
+        parts.append("")
+
+    if tier_b:
+        parts.append(
+            f"### Tier B — Core Volatility ({len(tier_b)} files, churn >= 20)\n"
+        )
+        parts.append(_hot_file_table(tier_b))
+        parts.append("")
+
+    if tier_c:
+        parts.append(
+            f"### Tier C — Worth Watching ({len(tier_c)} files, churn >= 10)\n"
+        )
+        parts.append(_hot_file_table(tier_c))
+        parts.append("")
+
+    skipped = len(hot_files) - len(filtered)
+    if skipped > 0:
+        parts.append(
+            f"*{skipped} files below churn threshold or noise (images, lock files) omitted.*"
         )
 
-    parts.append("")
-    parts.append(
-        "*Churn score = changes + bug_fixes x3 + reverts x5. "
-        "Higher score = needs more review attention.*"
-    )
-
     return "\n".join(parts)
+
+
+def _hot_file_table(files: list[HotFile]) -> str:
+    """Render a hot file table with fragility ratio."""
+    lines: list[str] = []
+    lines.append(
+        "| File | Changes | Bug Fixes | Fragility | Churn |"
+    )
+    lines.append(
+        "|------|---------|-----------|-----------|-------|"
+    )
+    for hf in files:
+        frag = _fragility_ratio(hf)
+        frag_str = f"{frag:.0%}"
+        # Flag extreme fragility
+        if frag >= 0.5:
+            frag_str = f"**{frag:.0%}**"
+        lines.append(
+            f"| `{hf.file_path}` | {hf.change_count} | "
+            f"{hf.bug_fix_count} | {frag_str} | {hf.churn_score:.0f} |"
+        )
+    return "\n".join(lines)
 
 
 def format_co_changes(file_path: str, co_changes: list[CoChange]) -> str:
