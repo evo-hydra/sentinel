@@ -101,10 +101,12 @@ def init(
 # Import and register sub-command groups
 from sentinel.cli.hive import hive_app  # noqa: E402
 from sentinel.cli.hunt import hunt  # noqa: E402
+from sentinel.cli.mcp_setup import mcp_setup  # noqa: E402
 from sentinel.cli.swarm import swarm  # noqa: E402
 from sentinel.cli.watch import watch  # noqa: E402
 
 app.command()(hunt)
 app.command()(swarm)
 app.command()(watch)
+app.command(name="mcp-setup")(mcp_setup)
 app.add_typer(hive_app, name="hive", help="Manage knowledge entries.")

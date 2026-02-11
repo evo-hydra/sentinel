@@ -37,3 +37,21 @@ jobs:
 
       - name: Check coverage
         run: pytest --cov=sentinel --cov-fail-under=85 -q --no-header
+
+  test-mcp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies with MCP
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,mcp]"
+
+      - name: Run MCP tests
+        run: pytest tests/test_mcp_formatters.py tests/test_mcp_server.py -v
