@@ -166,6 +166,12 @@ No `.sentinel/` directory found. Run `sentinel init` in your project root to ini
 - **No network.** MCP server reads local SQLite only. Zero external calls.
 - **Self-contained.** Each tool call opens and closes its own DB connection. No leaked state.
 
+### Batching Guidance
+
+Sentinel tools are safe to call in parallel with each other — they use independent SQLite connections with WAL mode.
+
+However, **do not batch Sentinel calls alongside tools that may fail** (e.g., `Bash(tsc)`, linters, test runners). In Claude Code, a sibling tool failure in the same parallel batch cancels all in-flight MCP calls with `"Sibling tool call errored"`. Since Sentinel calls are fast (<100ms) and never fail, batching them with fallible tools wastes the results.
+
 ---
 
 ## Performance Characteristics

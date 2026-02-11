@@ -79,7 +79,13 @@ def create_server() -> FastMCP:
 
     mcp = FastMCP(
         "sentinel",
-        instructions="Sentinel — persistent project intelligence for AI-assisted development",
+        instructions=(
+            "Sentinel — persistent project intelligence for AI-assisted development. "
+            "All tools are read-only, deterministic, and fast (<100ms). "
+            "IMPORTANT: Call Sentinel tools in their own parallel batch — do not mix "
+            "with Bash, lint, or typecheck calls that may fail. A sibling tool failure "
+            "in the same batch will cancel in-flight Sentinel results."
+        ),
     )
 
     @mcp.tool()
