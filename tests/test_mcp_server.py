@@ -366,30 +366,37 @@ def test_mcp_setup_merges_existing(tmp_path: Path) -> None:
 
 
 def test_mcp_setup_global(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """mcp-setup --global writes to ~/.claude/.mcp.json."""
-    from sentinel.cli.mcp_setup import _write_mcp_config
+    """mcp-setup --global writes to ~/.claude.json."""
+    from sentinel.cli.mcp_setup import _write_global_mcp_config
 
     fake_home = tmp_path / "home"
-    claude_dir = fake_home / ".claude"
-    claude_dir.mkdir(parents=True)
+    fake_home.mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
 
-    mcp_json = claude_dir / ".mcp.json"
-    _write_mcp_config(mcp_json)
+    _write_global_mcp_config()
 
-    loaded = json.loads(mcp_json.read_text())
+    loaded = json.loads((fake_home / ".claude.json").read_text())
     assert "sentinel" in loaded["mcpServers"]
     assert "sentinel-mcp" in loaded["mcpServers"]["sentinel"]["command"]
 
 
-def test_mcp_setup_global_merges_existing(tmp_path: Path) -> None:
-    """mcp-setup --global preserves existing entries."""
-    from sentinel.cli.mcp_setup import _write_mcp_config
+def test_mcp_setup_global_merges_existing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """mcp-setup --global preserves existing entries in ~/.claude.json."""
+    from sentinel.cli.mcp_setup import _write_global_mcp_config
 
-    mcp_json = tmp_path / ".mcp.json"
-    mcp_json.write_text(json.dumps({"mcpServers": {"anno": {"command": "node", "args": []}}}))
+    fake_home = tmp_path / "home"
+    fake_home.mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
 
-    _write_mcp_config(mcp_json)
+    claude_json = fake_home / ".claude.json"
+    claude_json.write_text(json.dumps({
+        "numStartups": 42,
+        "mcpServers": {"anno": {"command": "node", "args": []}},
+    }))
 
-    loaded = json.loads(mcp_json.read_text())
+    _write_global_mcp_config()
+
+    loaded = json.loads(claude_json.read_text())
     assert "anno" in loaded["mcpServers"]
     assert "sentinel" in loaded["mcpServers"]
+    assert loaded["numStartups"] == 42  # other keys preserved

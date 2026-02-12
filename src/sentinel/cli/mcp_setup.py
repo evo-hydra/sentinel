@@ -53,10 +53,33 @@ def _write_mcp_config(mcp_json: Path) -> None:
     theme.success(f"Wrote {mcp_json}")
 
 
+def _write_global_mcp_config() -> None:
+    """Merge sentinel entry into ~/.claude.json (user-scoped MCP config)."""
+    claude_json = Path.home() / ".claude.json"
+
+    if claude_json.exists():
+        try:
+            existing = json.loads(claude_json.read_text())
+        except (json.JSONDecodeError, OSError):
+            existing = {}
+    else:
+        existing = {}
+
+    servers = existing.get("mcpServers", {})
+    servers["sentinel"] = {
+        "command": _sentinel_mcp_command(),
+        "args": [],
+    }
+    existing["mcpServers"] = servers
+
+    claude_json.write_text(json.dumps(existing, indent=2) + "\n")
+    theme.success(f"Wrote {claude_json}")
+
+
 def mcp_setup(
     path: Path | None = typer.Argument(None, help="Project path (default: current directory)."),
     global_: bool = typer.Option(
-        False, "--global", "-g", help="Install to ~/.claude/.mcp.json (all projects)."
+        False, "--global", "-g", help="Install to ~/.claude.json (all projects)."
     ),
 ) -> None:
     """Register sentinel-mcp as an MCP server for Claude Code.
@@ -65,8 +88,7 @@ def mcp_setup(
     Use --global to register globally for all projects.
     """
     if global_:
-        mcp_json = Path.home() / ".claude" / ".mcp.json"
-        _write_mcp_config(mcp_json)
+        _write_global_mcp_config()
         theme.info(
             "Sentinel MCP is now available in all projects.\n"
             "  Restart Claude Code sessions to pick up the change."
