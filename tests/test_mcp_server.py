@@ -363,3 +363,33 @@ def test_mcp_setup_merges_existing(tmp_path: Path) -> None:
 
     assert "other-tool" in config["mcpServers"]
     assert "sentinel" in config["mcpServers"]
+
+
+def test_mcp_setup_global(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """mcp-setup --global writes to ~/.claude/.mcp.json."""
+    from sentinel.cli.mcp_setup import _write_mcp_config
+
+    fake_home = tmp_path / "home"
+    claude_dir = fake_home / ".claude"
+    claude_dir.mkdir(parents=True)
+
+    mcp_json = claude_dir / ".mcp.json"
+    _write_mcp_config(mcp_json)
+
+    loaded = json.loads(mcp_json.read_text())
+    assert "sentinel" in loaded["mcpServers"]
+    assert "sentinel-mcp" in loaded["mcpServers"]["sentinel"]["command"]
+
+
+def test_mcp_setup_global_merges_existing(tmp_path: Path) -> None:
+    """mcp-setup --global preserves existing entries."""
+    from sentinel.cli.mcp_setup import _write_mcp_config
+
+    mcp_json = tmp_path / ".mcp.json"
+    mcp_json.write_text(json.dumps({"mcpServers": {"anno": {"command": "node", "args": []}}}))
+
+    _write_mcp_config(mcp_json)
+
+    loaded = json.loads(mcp_json.read_text())
+    assert "anno" in loaded["mcpServers"]
+    assert "sentinel" in loaded["mcpServers"]

@@ -29,14 +29,50 @@ def _sentinel_mcp_command() -> str:
     return "sentinel-mcp"  # last resort: bare name
 
 
+def _write_mcp_config(mcp_json: Path) -> None:
+    """Write or merge sentinel entry into an .mcp.json file."""
+    sentinel_entry = {
+        "command": _sentinel_mcp_command(),
+        "args": [],
+    }
+
+    if mcp_json.exists():
+        try:
+            existing = json.loads(mcp_json.read_text())
+        except (json.JSONDecodeError, OSError):
+            existing = {}
+        servers = existing.get("mcpServers", {})
+        servers["sentinel"] = sentinel_entry
+        existing["mcpServers"] = servers
+        config = existing
+    else:
+        mcp_json.parent.mkdir(parents=True, exist_ok=True)
+        config = {"mcpServers": {"sentinel": sentinel_entry}}
+
+    mcp_json.write_text(json.dumps(config, indent=2) + "\n")
+    theme.success(f"Wrote {mcp_json}")
+
+
 def mcp_setup(
     path: Path | None = typer.Argument(None, help="Project path (default: current directory)."),
+    global_: bool = typer.Option(
+        False, "--global", "-g", help="Install to ~/.claude/.mcp.json (all projects)."
+    ),
 ) -> None:
-    """Write .mcp.json for Claude Code MCP integration.
+    """Register sentinel-mcp as an MCP server for Claude Code.
 
-    Creates a .mcp.json file in the project root that registers
-    sentinel-mcp as an MCP server for Claude Code.
+    By default, writes to the project-level .mcp.json.
+    Use --global to register globally for all projects.
     """
+    if global_:
+        mcp_json = Path.home() / ".claude" / ".mcp.json"
+        _write_mcp_config(mcp_json)
+        theme.info(
+            "Sentinel MCP is now available in all projects.\n"
+            "  Restart Claude Code sessions to pick up the change."
+        )
+        return
+
     target = (path or Path.cwd()).resolve()
     git_root = find_git_root(target)
 
@@ -51,28 +87,7 @@ def mcp_setup(
         )
         raise typer.Exit(1)
 
-    mcp_json = git_root / ".mcp.json"
-
-    sentinel_entry = {
-        "command": _sentinel_mcp_command(),
-        "args": [],
-    }
-
-    # Merge with existing .mcp.json if present
-    if mcp_json.exists():
-        try:
-            existing = json.loads(mcp_json.read_text())
-        except (json.JSONDecodeError, OSError):
-            existing = {}
-        servers = existing.get("mcpServers", {})
-        servers["sentinel"] = sentinel_entry
-        existing["mcpServers"] = servers
-        config = existing
-    else:
-        config = {"mcpServers": {"sentinel": sentinel_entry}}
-
-    mcp_json.write_text(json.dumps(config, indent=2) + "\n")
-    theme.success(f"Wrote {mcp_json}")
+    _write_mcp_config(git_root / ".mcp.json")
     theme.info(
         "Claude Code will now discover Sentinel tools automatically.\n"
         "  Or manually: [bold]claude mcp add sentinel -- sentinel-mcp[/]"
