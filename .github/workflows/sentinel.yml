@@ -1,0 +1,32 @@
+name: Sentinel PR Review
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Install from local checkout so we dogfood the current code,
+      # not whatever is on PyPI. The action's pip install becomes a no-op.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install from local checkout
+        run: pip install -e . --quiet
+
+      - name: Sentinel PR Review
+        uses: ./
+        with:
+          exit-code: "false"
+          post-comment: "true"

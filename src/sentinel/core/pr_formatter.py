@@ -4,20 +4,22 @@ from __future__ import annotations
 
 from sentinel.core.pr_analyzer import PRAnalysis
 
+SENTINEL_COMMENT_MARKER = "<!-- sentinel-review -->"
+
 
 def format_pr_comment(analysis: PRAnalysis) -> str:
     """Format a PRAnalysis as a GitHub PR comment in markdown."""
     parts: list[str] = []
 
+    parts.append(SENTINEL_COMMENT_MARKER)
+
     # Summary
-    finding_count = len(analysis.findings)
-    hot_count = len(analysis.hot_files_touched)
-    risk = "HIGH" if hot_count > 0 or finding_count > 3 else "LOW" if finding_count == 0 else "MEDIUM"
+    risk = analysis.risk_level
 
     parts.append("## Sentinel PR Review\n")
     parts.append(
         f"**{len(analysis.changed_files)} files changed** | "
-        f"**{finding_count} findings** | "
+        f"**{len(analysis.findings)} findings** | "
         f"**Risk: {risk}**\n"
     )
 

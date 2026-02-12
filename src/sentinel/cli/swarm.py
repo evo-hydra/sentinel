@@ -15,6 +15,7 @@ def swarm(
     max_commits: int = typer.Option(500, "--max-commits", help="Maximum commits to analyze."),
     json_output: bool = typer.Option(False, "--json", "-j", help="Output JSON."),
     enrich: bool = typer.Option(False, "--enrich", help="Run LLM-powered enrichment after analysis."),
+    embed: bool = typer.Option(False, "--embed", help="Generate embeddings for semantic search after analysis."),
 ) -> None:
     """Analyze the repo and learn from git history."""
     from sentinel.core.analyzer import GitAnalyzer
@@ -56,6 +57,10 @@ def swarm(
         if enrich and not json_output:
             from sentinel.cli.app import _run_enrichment
             _run_enrichment(store, results.commits, sentinel_dir)
+
+        if embed and not json_output:
+            from sentinel.cli.app import _run_embedding
+            _run_embedding(store, sentinel_dir)
 
         stats = store.stats()
 

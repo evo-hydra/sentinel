@@ -26,8 +26,20 @@ class PRAnalysis:
     relevant_pitfalls: list[Pitfall] = field(default_factory=list)
     relevant_decisions: list[Decision] = field(default_factory=list)
 
+    @property
+    def risk_level(self) -> str:
+        """Compute risk level: HIGH, MEDIUM, or LOW."""
+        finding_count = len(self.findings)
+        hot_count = len(self.hot_files_touched)
+        if hot_count > 0 or finding_count > 3:
+            return "HIGH"
+        if finding_count == 0:
+            return "LOW"
+        return "MEDIUM"
+
     def to_dict(self) -> dict:
         return {
+            "risk_level": self.risk_level,
             "changed_files": self.changed_files,
             "findings": [f.to_dict() for f in self.findings],
             "hot_files_touched": [

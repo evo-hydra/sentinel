@@ -48,3 +48,27 @@ def test_swarm_not_initialized(tmp_git_repo: Path, monkeypatch: pytest.MonkeyPat
     monkeypatch.chdir(tmp_git_repo)
     result = runner.invoke(app, ["swarm"])
     assert result.exit_code == 1
+
+
+def test_swarm_embed(tmp_git_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """swarm --embed calls _run_embedding after analysis."""
+    from unittest.mock import patch
+
+    _init_sentinel(tmp_git_repo)
+    monkeypatch.chdir(tmp_git_repo)
+    with patch("sentinel.cli.app._run_embedding") as mock_embed:
+        result = runner.invoke(app, ["swarm", "--full", "--embed"])
+    assert result.exit_code == 0
+    mock_embed.assert_called_once()
+
+
+def test_swarm_embed_skipped_with_json(tmp_git_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """swarm --embed --json should NOT run embedding (JSON mode suppresses side effects)."""
+    from unittest.mock import patch
+
+    _init_sentinel(tmp_git_repo)
+    monkeypatch.chdir(tmp_git_repo)
+    with patch("sentinel.cli.app._run_embedding") as mock_embed:
+        result = runner.invoke(app, ["swarm", "--full", "--embed", "--json"])
+    assert result.exit_code == 0
+    mock_embed.assert_not_called()

@@ -1,0 +1,123 @@
+name: "Sentinel PR Review"
+description: "Analyze pull requests against project knowledge from git history"
+branding:
+  icon: "shield"
+  color: "blue"
+
+inputs:
+  version:
+    description: "code-sentinel version to install"
+    required: false
+    default: ""
+  python-version:
+    description: "Python version to use"
+    required: false
+    default: "3.12"
+  base-branch:
+    description: "Base branch for PR comparison (default: repo default branch)"
+    required: false
+    default: ""
+  max-commits:
+    description: "Maximum commits to analyze during init"
+    required: false
+    default: "500"
+  exit-code:
+    description: "Fail workflow if risk level is HIGH"
+    required: false
+    default: "false"
+  post-comment:
+    description: "Post/update a review comment on the PR"
+    required: false
+    default: "true"
+
+outputs:
+  risk-level:
+    description: "Risk level: HIGH, MEDIUM, or LOW"
+    value: ${{ steps.review.outputs.risk-level }}
+  findings-count:
+    description: "Number of findings"
+    value: ${{ steps.review.outputs.findings-count }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Restore Sentinel cache
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: .sentinel
+        key: sentinel-${{ runner.os }}-${{ github.sha }}
+        restore-keys: |
+          sentinel-${{ runner.os }}-
+
+    - name: Install Sentinel
+      shell: bash
+      run: |
+        if python -c "import sentinel" 2>/dev/null; then
+          echo "code-sentinel already installed, skipping"
+        elif [ -n "${{ inputs.version }}" ]; then
+          pip install "code-sentinel==${{ inputs.version }}" --quiet
+        else
+          pip install code-sentinel --quiet
+        fi
+
+    - name: Initialize or update knowledge base
+      shell: bash
+      run: |
+        if [ -f ".sentinel/sentinel.db" ]; then
+          echo "Cache hit — running incremental update"
+          sentinel swarm
+        else
+          echo "No cache — initializing from git history"
+          sentinel init --max-commits ${{ inputs.max-commits }}
+        fi
+
+    - name: Run PR review (JSON)
+      id: review
+      shell: bash
+      run: |
+        BASE_FLAG=""
+        if [ -n "${{ inputs.base-branch }}" ]; then
+          BASE_FLAG="--base ${{ inputs.base-branch }}"
+        fi
+
+        OUTPUT=$(sentinel pr-review $BASE_FLAG --json)
+        RISK=$(echo "$OUTPUT" | python -c "import sys, json; print(json.load(sys.stdin)['risk_level'])")
+        FINDINGS=$(echo "$OUTPUT" | python -c "import sys, json; print(len(json.load(sys.stdin)['findings']))")
+
+        echo "risk-level=$RISK" >> "$GITHUB_OUTPUT"
+        echo "findings-count=$FINDINGS" >> "$GITHUB_OUTPUT"
+
+    - name: Post PR comment
+      if: inputs.post-comment == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        BASE_FLAG=""
+        if [ -n "${{ inputs.base-branch }}" ]; then
+          BASE_FLAG="--base ${{ inputs.base-branch }}"
+        fi
+
+        EXIT_FLAG=""
+        if [ "${{ inputs.exit-code }}" = "true" ]; then
+          EXIT_FLAG="--exit-code"
+        fi
+
+        sentinel pr-review $BASE_FLAG --update $EXIT_FLAG
+
+    - name: Exit code check (no comment)
+      if: inputs.post-comment != 'true' && inputs.exit-code == 'true'
+      shell: bash
+      run: |
+        BASE_FLAG=""
+        if [ -n "${{ inputs.base-branch }}" ]; then
+          BASE_FLAG="--base ${{ inputs.base-branch }}"
+        fi
+
+        sentinel pr-review $BASE_FLAG --exit-code

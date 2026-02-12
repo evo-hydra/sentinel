@@ -237,6 +237,8 @@ sentinel pr-review                          # Review current branch vs main
 sentinel pr-review --base develop           # Custom base branch
 sentinel pr-review --json                   # Structured output
 sentinel pr-review --post                   # Post as GitHub PR comment (requires gh CLI)
+sentinel pr-review --update                 # Create or update a single PR comment (upsert)
+sentinel pr-review --exit-code              # Exit with code 1 if risk is HIGH
 ```
 
 PR review checks:
@@ -244,6 +246,70 @@ PR review checks:
 - **Hot files touched** with churn/fragility stats
 - **Missing co-changes** — files that usually change together but weren't in the PR
 - **Relevant context** — decisions and pitfalls related to the changed area
+
+---
+
+## GitHub Action
+
+Run Sentinel PR reviews automatically on every push with a composite GitHub Action. No hosting required — uses your existing CI infrastructure.
+
+### Quick Start
+
+```yaml
+# .github/workflows/sentinel.yml
+name: Sentinel PR Review
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history required
+
+      - uses: evo-hydra/sentinel@v1
+        with:
+          exit-code: "true"  # Fail if HIGH risk
+```
+
+### Inputs
+
+| Input | Default | Description |
+|-------|---------|-------------|
+| `version` | latest | `code-sentinel` version to install |
+| `python-version` | `3.12` | Python version to use |
+| `base-branch` | repo default | Base branch for PR comparison |
+| `max-commits` | `500` | Maximum commits to analyze during init |
+| `exit-code` | `false` | Fail workflow if risk level is HIGH |
+| `post-comment` | `true` | Post/update a review comment on the PR |
+
+### Outputs
+
+| Output | Description |
+|--------|-------------|
+| `risk-level` | `HIGH`, `MEDIUM`, or `LOW` |
+| `findings-count` | Number of findings detected |
+
+### How It Works
+
+1. **Cache** — restores `.sentinel/` from GitHub Actions cache for fast incremental updates
+2. **Init or Swarm** — runs `sentinel init` on first run, `sentinel swarm` (incremental, <1s) on subsequent runs
+3. **Review** — analyzes PR changes against project knowledge
+4. **Comment** — creates or updates a single PR comment (no spam — uses `--update` to upsert)
+5. **Gate** — optionally fails the workflow if risk level is HIGH
+
+### Notes
+
+- **Full git history required** — use `fetch-depth: 0` in your checkout step
+- **No LLM needed** — the action uses rule-based analysis only (no API keys required)
+- **Fork PRs** — `github.token` cannot write comments on PRs from forks; set `post-comment: "false"` and use `risk-level` output instead
+- **Comment upsert** — uses an HTML marker (`<!-- sentinel-review -->`) to find and update existing comments, avoiding comment spam on repeated pushes
 
 ---
 
@@ -383,6 +449,7 @@ Schema migrations run automatically when opening a database from an older versio
 | `sentinel hunt --llm` | LLM-powered review (5 providers) |
 | `sentinel hunt --llm-bg` | Background LLM review |
 | `sentinel swarm` | Incremental learning from new commits |
+| `sentinel swarm --embed` | Incremental learning + refresh embeddings |
 | `sentinel hive list [--offset N]` | List knowledge entries (paginated) |
 | `sentinel hive add <type> <desc>` | Add manual knowledge |
 | `sentinel hive search <query>` | Full-text search (auto-detects semantic) |
@@ -390,6 +457,8 @@ Schema migrations run automatically when opening a database from an older versio
 | `sentinel feedback submit <id> <outcome>` | Submit feedback on a knowledge entry |
 | `sentinel feedback stats` | View aggregate feedback statistics |
 | `sentinel pr-review` | Analyze PR against project knowledge |
+| `sentinel pr-review --update` | Create or update a single PR comment (upsert) |
+| `sentinel pr-review --exit-code` | Exit with code 1 if risk is HIGH |
 | `sentinel share export` | Export anonymized patterns |
 | `sentinel share import <file>` | Import cross-project patterns |
 | `sentinel watch` | Install git hooks (pre-commit + post-commit) |

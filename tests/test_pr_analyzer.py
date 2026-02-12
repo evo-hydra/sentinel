@@ -9,7 +9,7 @@ from unittest.mock import patch
 from sentinel.core.config import SentinelConfig
 from sentinel.core.knowledge import KnowledgeStore
 from sentinel.core.pr_analyzer import PRAnalysis, PRAnalyzer
-from sentinel.core.pr_formatter import format_pr_comment
+from sentinel.core.pr_formatter import SENTINEL_COMMENT_MARKER, format_pr_comment
 from sentinel.models.knowledge import CoChange, HotFile
 
 
@@ -288,3 +288,67 @@ def test_pr_review_cli_no_sentinel(tmp_git_repo: Path) -> None:
         os.chdir(old_cwd)
 
     assert result.exit_code == 1
+
+
+# --- risk_level property tests ---
+
+
+def test_pr_analysis_risk_level_high_hot_files() -> None:
+    """Hot files touched → HIGH risk."""
+    analysis = PRAnalysis(
+        changed_files=["a.py"],
+        hot_files_touched=[HotFile(file_path="a.py", change_count=20, churn_score=50)],
+    )
+    assert analysis.risk_level == "HIGH"
+
+
+def test_pr_analysis_risk_level_high_many_findings() -> None:
+    """More than 3 findings → HIGH risk."""
+    from sentinel.models.findings import Finding
+
+    analysis = PRAnalysis(
+        changed_files=["a.py"],
+        findings=[Finding(message=f"Issue {i}") for i in range(4)],
+    )
+    assert analysis.risk_level == "HIGH"
+
+
+def test_pr_analysis_risk_level_medium() -> None:
+    """1-3 findings, no hot files → MEDIUM risk."""
+    from sentinel.models.findings import Finding
+
+    analysis = PRAnalysis(
+        changed_files=["a.py"],
+        findings=[Finding(message="Issue 1")],
+    )
+    assert analysis.risk_level == "MEDIUM"
+
+
+def test_pr_analysis_risk_level_low() -> None:
+    """No findings → LOW risk."""
+    analysis = PRAnalysis(changed_files=["a.py"])
+    assert analysis.risk_level == "LOW"
+
+
+def test_pr_analysis_risk_in_to_dict() -> None:
+    """risk_level appears in to_dict() output."""
+    analysis = PRAnalysis(changed_files=["a.py"])
+    d = analysis.to_dict()
+    assert "risk_level" in d
+    assert d["risk_level"] == "LOW"
+
+
+# --- comment marker tests ---
+
+
+def test_format_pr_comment_has_marker() -> None:
+    """Comment starts with the HTML marker."""
+    analysis = PRAnalysis(changed_files=["a.py"])
+    comment = format_pr_comment(analysis)
+    assert comment.startswith(SENTINEL_COMMENT_MARKER)
+
+
+def test_format_pr_comment_marker_is_html_comment() -> None:
+    """Marker is a valid HTML comment (invisible in rendered markdown)."""
+    assert SENTINEL_COMMENT_MARKER.startswith("<!--")
+    assert SENTINEL_COMMENT_MARKER.endswith("-->")
