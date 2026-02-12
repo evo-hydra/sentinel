@@ -6,7 +6,7 @@ branding:
 
 inputs:
   version:
-    description: "code-sentinel version to install"
+    description: "git-sentinel version to install"
     required: false
     default: ""
   python-version:
@@ -59,11 +59,11 @@ runs:
       shell: bash
       run: |
         if python -c "import sentinel" 2>/dev/null; then
-          echo "code-sentinel already installed, skipping"
+          echo "git-sentinel already installed, skipping"
         elif [ -n "${{ inputs.version }}" ]; then
-          pip install "code-sentinel==${{ inputs.version }}" --quiet
+          pip install "git-sentinel==${{ inputs.version }}" --quiet
         else
-          pip install code-sentinel --quiet
+          pip install git-sentinel --quiet
         fi
 
     - name: Initialize or update knowledge base

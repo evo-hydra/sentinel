@@ -71,4 +71,4 @@ def test_init_enrich_flag_without_provider(tmp_git_repo: Path) -> None:
 def test_version() -> None:
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert "0.3.3" in result.output
+    assert "0.3.4" in result.output

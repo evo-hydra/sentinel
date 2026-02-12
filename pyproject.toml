@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "code-sentinel"
-version = "0.3.3"
+name = "git-sentinel"
+version = "0.3.4"
 description = "Persistent project intelligence & AI code quality gate"
 readme = "README.md"
 license = "MIT"

@@ -98,7 +98,7 @@ def create_server() -> FastMCP:
     """Create and configure the MCP server with all tools registered."""
     if not HAS_MCP:
         raise ImportError(
-            "MCP package not installed. Install with: pip install code-sentinel[mcp]"
+            "MCP package not installed. Install with: pip install git-sentinel[mcp]"
         )
 
     mcp = FastMCP(
@@ -316,7 +316,7 @@ def main() -> None:
     if not HAS_MCP:
         print(
             "Error: MCP package not installed.\n"
-            "Install with: pip install code-sentinel[mcp]",
+            "Install with: pip install git-sentinel[mcp]",
             file=sys.stderr,
         )
         sys.exit(1)

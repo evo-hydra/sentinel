@@ -31,7 +31,7 @@ It is a **read-only intelligence surface** over your repository.
 A human provisions memory for the agent:
 
 ```bash
-pip install code-sentinel[mcp]    # Core + MCP server
+pip install git-sentinel[mcp]    # Core + MCP server
 cd your-project
 sentinel init                      # Learn from git history
 sentinel init --embed              # Learn + generate embeddings for semantic search
@@ -282,7 +282,7 @@ jobs:
 
 | Input | Default | Description |
 |-------|---------|-------------|
-| `version` | latest | `code-sentinel` version to install |
+| `version` | latest | `git-sentinel` version to install |
 | `python-version` | `3.12` | Python version to use |
 | `base-branch` | repo default | Base branch for PR comparison |
 | `max-commits` | `500` | Maximum commits to analyze during init |
@@ -478,7 +478,7 @@ sentinel hunt src/ --llm --provider <name>
 | `gemini` | `GEMINI_API_KEY` |
 | `grok` | `GROK_API_KEY` |
 
-Install with: `pip install code-sentinel[llm]`
+Install with: `pip install git-sentinel[llm]`
 
 ### Embedding Providers
 
