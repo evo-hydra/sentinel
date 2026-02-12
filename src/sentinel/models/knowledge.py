@@ -103,6 +103,17 @@ class CoChange:
 
 
 @dataclass
+class Feedback:
+    """Feedback on a knowledge entry (convention, decision, pitfall)."""
+    id: str = field(default_factory=_uuid)
+    knowledge_id: str = ""
+    knowledge_type: str = ""   # convention/decision/pitfall
+    outcome: str = ""          # accepted/rejected/modified
+    context: str = ""
+    created_at: str = field(default_factory=_now)
+
+
+@dataclass
 class AnalysisResult:
     """Aggregated results from a git history analysis."""
     conventions: list[Convention] = field(default_factory=list)

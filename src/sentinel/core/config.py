@@ -27,6 +27,9 @@ class SentinelConfig(BaseModel):
     # Hot file churn score threshold
     hot_file_threshold: float = 10.0
 
+    # PR review base branch
+    pr_base_branch: str = "main"
+
     # Paths to exclude from scanning
     exclude_patterns: list[str] = Field(default_factory=lambda: [
         ".git", ".sentinel", "__pycache__", "node_modules", ".venv",

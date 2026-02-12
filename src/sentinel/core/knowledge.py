@@ -20,6 +20,7 @@ from sentinel.models.knowledge import (
     CodePattern,
     Convention,
     Decision,
+    Feedback,
     HotFile,
     Pitfall,
 )
@@ -29,7 +30,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sentinel_meta (
@@ -38,16 +39,18 @@ CREATE TABLE IF NOT EXISTS sentinel_meta (
 );
 
 CREATE TABLE IF NOT EXISTS conventions (
-    id          TEXT PRIMARY KEY,
-    category    TEXT NOT NULL,
-    pattern     TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    evidence    TEXT NOT NULL DEFAULT '[]',
-    confidence  REAL NOT NULL DEFAULT 0.5,
-    frequency   INTEGER NOT NULL DEFAULT 1,
-    first_seen  TEXT NOT NULL,
-    last_seen   TEXT NOT NULL,
-    source      TEXT NOT NULL DEFAULT 'git_history'
+    id             TEXT PRIMARY KEY,
+    category       TEXT NOT NULL,
+    pattern        TEXT NOT NULL,
+    description    TEXT NOT NULL DEFAULT '',
+    evidence       TEXT NOT NULL DEFAULT '[]',
+    confidence     REAL NOT NULL DEFAULT 0.5,
+    frequency      INTEGER NOT NULL DEFAULT 1,
+    first_seen     TEXT NOT NULL,
+    last_seen      TEXT NOT NULL,
+    source         TEXT NOT NULL DEFAULT 'git_history',
+    accepted_count INTEGER NOT NULL DEFAULT 0,
+    rejected_count INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS decisions (
@@ -73,7 +76,9 @@ CREATE TABLE IF NOT EXISTS pitfalls (
     frequency      INTEGER NOT NULL DEFAULT 1,
     first_seen     TEXT NOT NULL,
     last_seen      TEXT NOT NULL,
-    source         TEXT NOT NULL DEFAULT 'git_history'
+    source         TEXT NOT NULL DEFAULT 'git_history',
+    accepted_count INTEGER NOT NULL DEFAULT 0,
+    rejected_count INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS patterns (
@@ -107,6 +112,28 @@ CREATE TABLE IF NOT EXISTS scan_history (
     last_sha        TEXT NOT NULL DEFAULT '',
     commits_scanned INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS feedback (
+    id             TEXT PRIMARY KEY,
+    knowledge_id   TEXT NOT NULL,
+    knowledge_type TEXT NOT NULL,
+    outcome        TEXT NOT NULL,
+    context        TEXT NOT NULL DEFAULT '',
+    created_at     TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_feedback_knowledge_id ON feedback(knowledge_id);
+
+CREATE TABLE IF NOT EXISTS shared_patterns (
+    id              TEXT PRIMARY KEY,
+    knowledge_type  TEXT NOT NULL,
+    category        TEXT NOT NULL DEFAULT '',
+    description     TEXT NOT NULL,
+    severity        TEXT,
+    confidence      REAL NOT NULL DEFAULT 0.3,
+    source_project  TEXT NOT NULL DEFAULT '',
+    imported_at     TEXT NOT NULL
+);
 """
 
 _FTS_SCHEMA = """
@@ -131,8 +158,49 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_co_changes_file_b ON co_changes(file_b)")
 
 
+def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
+    """Add feedback table and accepted/rejected counts to conventions and pitfalls."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS feedback (
+            id             TEXT PRIMARY KEY,
+            knowledge_id   TEXT NOT NULL,
+            knowledge_type TEXT NOT NULL,
+            outcome        TEXT NOT NULL,
+            context        TEXT NOT NULL DEFAULT '',
+            created_at     TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_feedback_knowledge_id ON feedback(knowledge_id);
+    """)
+    for table in ("conventions", "pitfalls"):
+        for col in ("accepted_count", "rejected_count"):
+            try:
+                conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0"
+                )
+            except sqlite3.OperationalError:
+                logger.debug("Column '%s' already exists on %s, skipping", col, table)
+
+
+def _migrate_v3_to_v4(conn: sqlite3.Connection) -> None:
+    """Add shared_patterns table for cross-project knowledge."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS shared_patterns (
+            id              TEXT PRIMARY KEY,
+            knowledge_type  TEXT NOT NULL,
+            category        TEXT NOT NULL DEFAULT '',
+            description     TEXT NOT NULL,
+            severity        TEXT,
+            confidence      REAL NOT NULL DEFAULT 0.3,
+            source_project  TEXT NOT NULL DEFAULT '',
+            imported_at     TEXT NOT NULL
+        );
+    """)
+
+
 _MIGRATIONS: dict[int, Any] = {
     1: _migrate_v1_to_v2,
+    2: _migrate_v2_to_v3,
+    3: _migrate_v3_to_v4,
 }
 
 
@@ -186,15 +254,24 @@ class KnowledgeStore:
         stored = self.get_meta("schema_version", "")
         if stored:
             return int(stored)
-        # No schema_version key — this is either a new DB or a pre-migration v1 DB.
-        # Check if the decisions table has a 'source' column (added in v2 schema).
+        # No schema_version key — check structural markers to infer version.
         cursor = self.conn.execute("PRAGMA table_info(decisions)")
         columns = {row["name"] for row in cursor.fetchall()}
-        if "source" in columns:
-            # New DB created with latest schema
+        if "source" not in columns:
+            return 1  # Old v1 DB
+        # Has source column — check if feedback/shared_patterns exist (new DB with latest schema)
+        tables = {
+            row[0]
+            for row in self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "shared_patterns" in tables:
             return SCHEMA_VERSION
-        # Old v1 DB
-        return 1
+        if "feedback" in tables:
+            return 3
+        # Has source but no feedback table — v2 DB or new DB created with old schema
+        return 2
 
     def _run_migrations(self) -> None:
         """Run pending schema migrations from current version to SCHEMA_VERSION."""
@@ -460,6 +537,93 @@ class KnowledgeStore:
         sha = self.get_meta("last_swarm_sha")
         return sha if sha else None
 
+    # --- Feedback ---
+
+    def add_feedback(self, f: Feedback) -> None:
+        """Record feedback on a knowledge entry and update counts."""
+        self.conn.execute(
+            """INSERT INTO feedback (id, knowledge_id, knowledge_type, outcome, context, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)""",
+            (f.id, f.knowledge_id, f.knowledge_type, f.outcome, f.context, f.created_at),
+        )
+        self.conn.commit()
+        self._update_feedback_counts(f.knowledge_id, f.knowledge_type, f.outcome)
+
+    def _update_feedback_counts(self, knowledge_id: str, knowledge_type: str, outcome: str) -> None:
+        """Increment accepted_count or rejected_count on the referenced row."""
+        if knowledge_type not in ("convention", "pitfall"):
+            return
+        table = "conventions" if knowledge_type == "convention" else "pitfalls"
+        col = "accepted_count" if outcome == "accepted" else "rejected_count" if outcome == "rejected" else None
+        if col is None:
+            return
+        # table and col are from hardcoded values above — safe to interpolate
+        self.conn.execute(
+            f"UPDATE {table} SET {col} = {col} + 1 WHERE id = ?", (knowledge_id,)
+        )
+        self.conn.commit()
+        if knowledge_type == "convention":
+            self.update_confidence_from_feedback(knowledge_id)
+
+    def get_feedback(self, knowledge_id: str) -> list[Feedback]:
+        """Get all feedback for a knowledge entry."""
+        rows = self.conn.execute(
+            "SELECT * FROM feedback WHERE knowledge_id = ? ORDER BY created_at DESC",
+            (knowledge_id,),
+        ).fetchall()
+        return [Feedback(
+            id=r["id"], knowledge_id=r["knowledge_id"], knowledge_type=r["knowledge_type"],
+            outcome=r["outcome"], context=r["context"], created_at=r["created_at"],
+        ) for r in rows]
+
+    def get_feedback_stats(self) -> dict:
+        """Aggregate feedback stats: total, acceptance rate, top accepted/rejected."""
+        total = self.conn.execute("SELECT COUNT(*) as cnt FROM feedback").fetchone()["cnt"]
+        accepted = self.conn.execute(
+            "SELECT COUNT(*) as cnt FROM feedback WHERE outcome = 'accepted'"
+        ).fetchone()["cnt"]
+
+        top_accepted = self.conn.execute(
+            """SELECT knowledge_id, COUNT(*) as cnt FROM feedback
+            WHERE outcome = 'accepted' GROUP BY knowledge_id ORDER BY cnt DESC LIMIT 5"""
+        ).fetchall()
+        top_rejected = self.conn.execute(
+            """SELECT knowledge_id, COUNT(*) as cnt FROM feedback
+            WHERE outcome = 'rejected' GROUP BY knowledge_id ORDER BY cnt DESC LIMIT 5"""
+        ).fetchall()
+
+        return {
+            "total": total,
+            "accepted": accepted,
+            "rejected": total - accepted,
+            "acceptance_rate": accepted / total if total > 0 else 0.0,
+            "top_accepted": [(r["knowledge_id"], r["cnt"]) for r in top_accepted],
+            "top_rejected": [(r["knowledge_id"], r["cnt"]) for r in top_rejected],
+        }
+
+    def update_confidence_from_feedback(self, knowledge_id: str) -> None:
+        """Recalculate convention confidence from feedback counts.
+
+        Formula: new_confidence = 0.6 * (accepted / (accepted + rejected)) + 0.4 * original_confidence
+        """
+        row = self.conn.execute(
+            "SELECT confidence, accepted_count, rejected_count FROM conventions WHERE id = ?",
+            (knowledge_id,),
+        ).fetchone()
+        if row is None:
+            return
+        acc = row["accepted_count"]
+        rej = row["rejected_count"]
+        if acc + rej == 0:
+            return
+        feedback_ratio = acc / (acc + rej)
+        new_confidence = 0.6 * feedback_ratio + 0.4 * row["confidence"]
+        self.conn.execute(
+            "UPDATE conventions SET confidence = ? WHERE id = ?",
+            (new_confidence, knowledge_id),
+        )
+        self.conn.commit()
+
     # --- FTS5 search ---
 
     def _index_fts(self, knowledge_id: str, ktype: KnowledgeType, content: str) -> None:
@@ -586,7 +750,8 @@ class KnowledgeStore:
     # --- Stats ---
 
     _KNOWN_TABLES = frozenset(
-        {"conventions", "decisions", "pitfalls", "patterns", "hot_files", "co_changes"}
+        {"conventions", "decisions", "pitfalls", "patterns", "hot_files", "co_changes",
+         "feedback", "shared_patterns"}
     )
 
     def stats(self) -> dict[str, int]:

@@ -188,7 +188,7 @@ def format_conventions(conventions: list[Convention]) -> str:
     for c in conventions:
         desc = c.description or c.pattern
         parts.append(
-            f"- **[{c.category.value}]** {desc}\n"
+            f"- **[{c.category.value}]** {desc} (id: {c.id[:8]})\n"
             f"  Confidence: {c.confidence:.0%} | Frequency: {c.frequency} | "
             f"Source: {c.source.value}"
         )
@@ -212,7 +212,7 @@ def format_pitfalls(pitfalls: list[Pitfall]) -> str:
         }.get(p.severity.value, "   ")
 
         source_tag = f" [{p.source.value}]" if p.source.value != "git_history" else ""
-        parts.append(f"- {severity_icon} **[{p.severity.value}]** {p.description}{source_tag}")
+        parts.append(f"- {severity_icon} **[{p.severity.value}]** {p.description}{source_tag} (id: {p.id[:8]})")
         if p.how_to_prevent:
             parts.append(f"  *Prevent:* {p.how_to_prevent}")
         if p.code_pattern:
@@ -228,7 +228,7 @@ def format_decisions(decisions: list[Decision]) -> str:
 
     parts: list[str] = ["## Architectural Decisions\n"]
     for d in decisions:
-        parts.append(f"### {d.summary}\n")
+        parts.append(f"### {d.summary} (id: {d.id[:8]})\n")
         if d.rationale:
             parts.append(f"> {d.rationale}\n")
         meta: list[str] = []

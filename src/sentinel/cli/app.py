@@ -134,9 +134,12 @@ def _run_enrichment(
 
 # Import and register sub-command groups
 from sentinel.cli.enrich import enrich  # noqa: E402
+from sentinel.cli.feedback import feedback_app  # noqa: E402
 from sentinel.cli.hive import hive_app  # noqa: E402
 from sentinel.cli.hunt import hunt  # noqa: E402
 from sentinel.cli.mcp_setup import mcp_setup  # noqa: E402
+from sentinel.cli.pr_review import pr_review  # noqa: E402
+from sentinel.cli.share import share_app  # noqa: E402
 from sentinel.cli.swarm import swarm  # noqa: E402
 from sentinel.cli.watch import watch  # noqa: E402
 
@@ -145,4 +148,7 @@ app.command()(swarm)
 app.command()(watch)
 app.command(name="mcp-setup")(mcp_setup)
 app.command()(enrich)
+app.command(name="pr-review")(pr_review)
 app.add_typer(hive_app, name="hive", help="Manage knowledge entries.")
+app.add_typer(feedback_app, name="feedback", help="Submit and view feedback on knowledge entries.")
+app.add_typer(share_app, name="share", help="Export and import cross-project knowledge.")

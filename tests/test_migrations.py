@@ -112,6 +112,239 @@ def test_v1_to_v2_migration(tmp_path: Path) -> None:
         assert len(indexes) == 1
 
 
+def test_v2_to_v3_migration(tmp_path: Path) -> None:
+    """Simulate a v2 DB and verify migration adds feedback table and counts."""
+    db_path = tmp_path / "sentinel.db"
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE sentinel_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE conventions (
+            id TEXT PRIMARY KEY, category TEXT NOT NULL, pattern TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '', evidence TEXT NOT NULL DEFAULT '[]',
+            confidence REAL NOT NULL DEFAULT 0.5, frequency INTEGER NOT NULL DEFAULT 1,
+            first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'git_history'
+        );
+        CREATE TABLE decisions (
+            id TEXT PRIMARY KEY, summary TEXT NOT NULL, rationale TEXT NOT NULL DEFAULT '',
+            commit_sha TEXT NOT NULL DEFAULT '', author TEXT NOT NULL DEFAULT '',
+            decided_at TEXT NOT NULL, file_paths TEXT NOT NULL DEFAULT '[]',
+            tags TEXT NOT NULL DEFAULT '[]',
+            source TEXT NOT NULL DEFAULT 'git_history'
+        );
+        CREATE TABLE pitfalls (
+            id TEXT PRIMARY KEY, category TEXT NOT NULL DEFAULT 'bug',
+            severity TEXT NOT NULL DEFAULT 'medium', description TEXT NOT NULL,
+            code_pattern TEXT, how_to_prevent TEXT NOT NULL DEFAULT '',
+            evidence TEXT NOT NULL DEFAULT '[]', frequency INTEGER NOT NULL DEFAULT 1,
+            first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'git_history'
+        );
+        CREATE TABLE patterns (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+            ast_pattern TEXT NOT NULL DEFAULT '', file_glob TEXT NOT NULL DEFAULT '',
+            frequency INTEGER NOT NULL DEFAULT 1, examples TEXT NOT NULL DEFAULT '[]'
+        );
+        CREATE TABLE hot_files (
+            file_path TEXT PRIMARY KEY, change_count INTEGER NOT NULL DEFAULT 0,
+            bug_fix_count INTEGER NOT NULL DEFAULT 0, revert_count INTEGER NOT NULL DEFAULT 0,
+            churn_score REAL NOT NULL DEFAULT 0.0
+        );
+        CREATE TABLE co_changes (
+            file_a TEXT NOT NULL, file_b TEXT NOT NULL,
+            change_count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (file_a, file_b)
+        );
+        CREATE INDEX IF NOT EXISTS idx_co_changes_file_b ON co_changes(file_b);
+        CREATE TABLE scan_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, scanned_at TEXT NOT NULL,
+            last_sha TEXT NOT NULL DEFAULT '', commits_scanned INTEGER NOT NULL DEFAULT 0
+        );
+    """)
+    conn.execute("INSERT INTO sentinel_meta (key, value) VALUES ('schema_version', '2')")
+    conn.execute(
+        "INSERT INTO conventions (id, category, pattern, first_seen, last_seen) VALUES (?, ?, ?, ?, ?)",
+        ("conv-1", "naming", "snake_case", "2024-01-01", "2024-01-01"),
+    )
+    conn.commit()
+    conn.close()
+
+    with KnowledgeStore(db_path) as store:
+        assert store.get_meta("schema_version") == str(SCHEMA_VERSION)
+
+        # Check feedback table exists
+        tables = {
+            row[0] for row in store.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "feedback" in tables
+
+        # Check accepted_count/rejected_count columns
+        for table in ("conventions", "pitfalls"):
+            cursor = store.conn.execute(f"PRAGMA table_info({table})")
+            columns = {row["name"] for row in cursor.fetchall()}
+            assert "accepted_count" in columns, f"Missing accepted_count on {table}"
+            assert "rejected_count" in columns, f"Missing rejected_count on {table}"
+
+
+def test_v3_to_v4_migration(tmp_path: Path) -> None:
+    """Simulate a v3 DB and verify migration adds shared_patterns table."""
+    db_path = tmp_path / "sentinel.db"
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE sentinel_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE conventions (
+            id TEXT PRIMARY KEY, category TEXT NOT NULL, pattern TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '', evidence TEXT NOT NULL DEFAULT '[]',
+            confidence REAL NOT NULL DEFAULT 0.5, frequency INTEGER NOT NULL DEFAULT 1,
+            first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'git_history',
+            accepted_count INTEGER NOT NULL DEFAULT 0,
+            rejected_count INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE decisions (
+            id TEXT PRIMARY KEY, summary TEXT NOT NULL, rationale TEXT NOT NULL DEFAULT '',
+            commit_sha TEXT NOT NULL DEFAULT '', author TEXT NOT NULL DEFAULT '',
+            decided_at TEXT NOT NULL, file_paths TEXT NOT NULL DEFAULT '[]',
+            tags TEXT NOT NULL DEFAULT '[]',
+            source TEXT NOT NULL DEFAULT 'git_history'
+        );
+        CREATE TABLE pitfalls (
+            id TEXT PRIMARY KEY, category TEXT NOT NULL DEFAULT 'bug',
+            severity TEXT NOT NULL DEFAULT 'medium', description TEXT NOT NULL,
+            code_pattern TEXT, how_to_prevent TEXT NOT NULL DEFAULT '',
+            evidence TEXT NOT NULL DEFAULT '[]', frequency INTEGER NOT NULL DEFAULT 1,
+            first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'git_history',
+            accepted_count INTEGER NOT NULL DEFAULT 0,
+            rejected_count INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE patterns (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+            ast_pattern TEXT NOT NULL DEFAULT '', file_glob TEXT NOT NULL DEFAULT '',
+            frequency INTEGER NOT NULL DEFAULT 1, examples TEXT NOT NULL DEFAULT '[]'
+        );
+        CREATE TABLE hot_files (
+            file_path TEXT PRIMARY KEY, change_count INTEGER NOT NULL DEFAULT 0,
+            bug_fix_count INTEGER NOT NULL DEFAULT 0, revert_count INTEGER NOT NULL DEFAULT 0,
+            churn_score REAL NOT NULL DEFAULT 0.0
+        );
+        CREATE TABLE co_changes (
+            file_a TEXT NOT NULL, file_b TEXT NOT NULL,
+            change_count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (file_a, file_b)
+        );
+        CREATE TABLE scan_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, scanned_at TEXT NOT NULL,
+            last_sha TEXT NOT NULL DEFAULT '', commits_scanned INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE feedback (
+            id TEXT PRIMARY KEY, knowledge_id TEXT NOT NULL,
+            knowledge_type TEXT NOT NULL, outcome TEXT NOT NULL,
+            context TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_feedback_knowledge_id ON feedback(knowledge_id);
+    """)
+    conn.execute("INSERT INTO sentinel_meta (key, value) VALUES ('schema_version', '3')")
+    conn.commit()
+    conn.close()
+
+    with KnowledgeStore(db_path) as store:
+        assert store.get_meta("schema_version") == str(SCHEMA_VERSION)
+
+        tables = {
+            row[0] for row in store.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "shared_patterns" in tables
+
+
+def test_full_migration_chain(tmp_path: Path) -> None:
+    """A v1 DB should migrate all the way to v4."""
+    db_path = tmp_path / "sentinel.db"
+
+    # Create a bare-bones v1 DB
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript("""
+        CREATE TABLE sentinel_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE conventions (
+            id TEXT PRIMARY KEY, category TEXT NOT NULL, pattern TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '', evidence TEXT NOT NULL DEFAULT '[]',
+            confidence REAL NOT NULL DEFAULT 0.5, frequency INTEGER NOT NULL DEFAULT 1,
+            first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'git_history'
+        );
+        CREATE TABLE decisions (
+            id TEXT PRIMARY KEY, summary TEXT NOT NULL, rationale TEXT NOT NULL DEFAULT '',
+            commit_sha TEXT NOT NULL DEFAULT '', author TEXT NOT NULL DEFAULT '',
+            decided_at TEXT NOT NULL, file_paths TEXT NOT NULL DEFAULT '[]',
+            tags TEXT NOT NULL DEFAULT '[]'
+        );
+        CREATE TABLE pitfalls (
+            id TEXT PRIMARY KEY, category TEXT NOT NULL DEFAULT 'bug',
+            severity TEXT NOT NULL DEFAULT 'medium', description TEXT NOT NULL,
+            code_pattern TEXT, how_to_prevent TEXT NOT NULL DEFAULT '',
+            evidence TEXT NOT NULL DEFAULT '[]', frequency INTEGER NOT NULL DEFAULT 1,
+            first_seen TEXT NOT NULL, last_seen TEXT NOT NULL
+        );
+        CREATE TABLE patterns (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+            ast_pattern TEXT NOT NULL DEFAULT '', file_glob TEXT NOT NULL DEFAULT '',
+            frequency INTEGER NOT NULL DEFAULT 1, examples TEXT NOT NULL DEFAULT '[]'
+        );
+        CREATE TABLE hot_files (
+            file_path TEXT PRIMARY KEY, change_count INTEGER NOT NULL DEFAULT 0,
+            bug_fix_count INTEGER NOT NULL DEFAULT 0, revert_count INTEGER NOT NULL DEFAULT 0,
+            churn_score REAL NOT NULL DEFAULT 0.0
+        );
+        CREATE TABLE co_changes (
+            file_a TEXT NOT NULL, file_b TEXT NOT NULL,
+            change_count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (file_a, file_b)
+        );
+        CREATE TABLE scan_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, scanned_at TEXT NOT NULL,
+            last_sha TEXT NOT NULL DEFAULT '', commits_scanned INTEGER NOT NULL DEFAULT 0
+        );
+    """)
+    conn.execute(
+        "INSERT INTO decisions (id, summary, decided_at) VALUES (?, ?, ?)",
+        ("d1", "Use FastAPI", "2024-01-01"),
+    )
+    conn.commit()
+    conn.close()
+
+    with KnowledgeStore(db_path) as store:
+        assert store.get_meta("schema_version") == str(SCHEMA_VERSION)
+
+        # v1->v2: source column on decisions
+        decisions = store.get_decisions()
+        assert len(decisions) == 1
+        assert decisions[0].source.value == "git_history"
+
+        # v2->v3: feedback table
+        tables = {
+            row[0] for row in store.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "feedback" in tables
+
+        # v3->v4: shared_patterns table
+        assert "shared_patterns" in tables
+
+        # Check accepted_count on conventions
+        cursor = store.conn.execute("PRAGMA table_info(conventions)")
+        columns = {row["name"] for row in cursor.fetchall()}
+        assert "accepted_count" in columns
+
+
 def test_migration_idempotent(tmp_path: Path) -> None:
     """Running migration twice should not cause errors."""
     db_path = tmp_path / "sentinel.db"

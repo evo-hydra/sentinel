@@ -188,6 +188,52 @@ def create_server() -> FastMCP:
             store.close()
 
     @mcp.tool()
+    def sentinel_feedback(knowledge_id: str, outcome: str, context: str = "") -> str:
+        """Submit feedback on a knowledge entry (convention, pitfall, decision).
+
+        Use this after acting on Sentinel advice to help it learn which
+        suggestions are useful. Feedback improves future confidence scores.
+
+        Args:
+            knowledge_id: ID of the knowledge entry (first 8+ chars from tool output)
+            outcome: One of "accepted", "rejected", "modified"
+            context: Optional explanation of why
+        """
+        from sentinel.models.enums import FeedbackOutcome
+        from sentinel.models.knowledge import Feedback
+
+        valid = {o.value for o in FeedbackOutcome}
+        if outcome not in valid:
+            return f"Invalid outcome: {outcome}. Must be one of: {', '.join(sorted(valid))}"
+
+        store = _open_store()
+        if store is None:
+            return _no_sentinel_msg()
+        try:
+            # Detect knowledge type
+            ktype = "unknown"
+            for table, kt in [("conventions", "convention"), ("decisions", "decision"), ("pitfalls", "pitfall")]:
+                row = store.conn.execute(f"SELECT id FROM {table} WHERE id = ?", (knowledge_id,)).fetchone()
+                if row:
+                    ktype = kt
+                    break
+
+            fb = Feedback(
+                knowledge_id=knowledge_id,
+                knowledge_type=ktype,
+                outcome=outcome,
+                context=context,
+            )
+            store.add_feedback(fb)
+            feedback_list = store.get_feedback(knowledge_id)
+            return (
+                f"Feedback recorded: {outcome} on {knowledge_id[:8]}... "
+                f"({len(feedback_list)} total feedback entries for this item)"
+            )
+        finally:
+            store.close()
+
+    @mcp.tool()
     def sentinel_co_changes(file_path: str) -> str:
         """Find files that usually change together with the given file.
 

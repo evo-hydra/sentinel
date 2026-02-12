@@ -54,3 +54,11 @@ class KnowledgeSource(str, Enum):
     GIT_HISTORY = "git_history"
     MANUAL = "manual"
     INFERRED = "inferred"
+    CROSS_PROJECT = "cross_project"
+
+
+class FeedbackOutcome(str, Enum):
+    """Outcomes for feedback on knowledge entries."""
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    MODIFIED = "modified"
