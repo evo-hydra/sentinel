@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from sentinel.core.git import git_files_changed, git_log, git_rev_parse_head
+from sentinel.core.git import git_log_with_files, git_rev_parse_head
 from sentinel.models.enums import (
     ConventionCategory,
     KnowledgeSource,
@@ -45,6 +46,9 @@ _CAMEL_CASE = re.compile(r"^[a-z][a-zA-Z0-9]*\.[a-z]+$")
 _PASCAL_CASE = re.compile(r"^[A-Z][a-zA-Z0-9]*\.[a-z]+$")
 
 
+logger = logging.getLogger(__name__)
+
+
 class GitAnalyzer:
     """Analyzes git history to extract project knowledge."""
 
@@ -60,7 +64,7 @@ class GitAnalyzer:
         return self._analyze(max_commits=max_commits, since_sha=since_sha)
 
     def _analyze(self, max_commits: int, since_sha: str | None) -> AnalysisResult:
-        raw = git_log(self.repo_path, max_count=max_commits, since_sha=since_sha)
+        raw = git_log_with_files(self.repo_path, max_count=max_commits, since_sha=since_sha)
         commits = self._parse_log(raw)
 
         if not commits:
@@ -69,6 +73,7 @@ class GitAnalyzer:
         result = AnalysisResult(
             commits_analyzed=len(commits),
             last_sha=commits[0]["sha"] if commits else git_rev_parse_head(self.repo_path),
+            commits=commits,
         )
 
         # Extract knowledge
@@ -81,15 +86,31 @@ class GitAnalyzer:
         return result
 
     def _parse_log(self, raw: str) -> list[dict]:
-        """Parse git log output into structured commits."""
+        """Parse git log output with embedded file lists (single-pass format)."""
         commits = []
-        entries = raw.split("---END---")
+        entries = raw.split("---COMMIT---")
 
         for entry in entries:
             entry = entry.strip()
             if not entry:
                 continue
-            lines = entry.split("\n")
+
+            # Split metadata+body from file list
+            if "---FILES---" in entry:
+                meta_part, files_part = entry.split("---FILES---", 1)
+            else:
+                meta_part = entry
+                files_part = ""
+
+            # Parse body out of metadata
+            if "---BODY---" in meta_part:
+                header_part, body = meta_part.split("---BODY---", 1)
+                body = body.strip()
+            else:
+                header_part = meta_part
+                body = ""
+
+            lines = header_part.strip().split("\n")
             if len(lines) < 5:
                 continue
 
@@ -97,14 +118,7 @@ class GitAnalyzer:
             if not sha or len(sha) < 7:
                 continue
 
-            body_lines = lines[5:] if len(lines) > 5 else []
-            body = "\n".join(body_lines).strip()
-
-            files = []
-            try:
-                files = git_files_changed(self.repo_path, sha)
-            except Exception:
-                pass
+            files = [f.strip() for f in files_part.strip().split("\n") if f.strip()]
 
             commits.append({
                 "sha": sha,

@@ -48,6 +48,7 @@ class Decision:
     decided_at: str = field(default_factory=_now)
     file_paths: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
+    source: KnowledgeSource = KnowledgeSource.GIT_HISTORY
 
 
 @dataclass
@@ -63,6 +64,7 @@ class Pitfall:
     frequency: int = 1
     first_seen: str = field(default_factory=_now)
     last_seen: str = field(default_factory=_now)
+    source: KnowledgeSource = KnowledgeSource.GIT_HISTORY
 
 
 @dataclass
@@ -111,3 +113,4 @@ class AnalysisResult:
     co_changes: list[CoChange] = field(default_factory=list)
     commits_analyzed: int = 0
     last_sha: str | None = None
+    commits: list[dict] = field(default_factory=list)  # raw parsed commits for enrichment

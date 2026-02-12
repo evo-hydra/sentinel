@@ -39,7 +39,7 @@ class SentinelConfig(BaseModel):
         ".java", ".rb", ".php", ".c", ".cpp", ".h",
     ])
 
-    # LLM settings
+    # LLM settings (used by hunt --llm)
     llm_provider: str = "ollama"  # ollama, anthropic, openai, gemini, grok
     llm_model: str = "deepseek-coder:6.7b-instruct-q4_K_M"
     llm_max_tokens: int = 4096
@@ -47,6 +47,11 @@ class SentinelConfig(BaseModel):
     llm_max_file_size: int = 50_000  # skip files larger than 50KB
     llm_ollama_url: str = "http://localhost:11434"
     llm_workers: int = 2
+
+    # Enrichment settings (LLM-powered knowledge extraction)
+    enrich_provider: str = "anthropic"
+    enrich_model: str = "claude-haiku-4-5-20251001"
+    enrich_batch_size: int = 25
 
     @classmethod
     def load(cls, sentinel_dir: Path) -> SentinelConfig:

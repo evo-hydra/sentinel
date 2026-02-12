@@ -167,6 +167,31 @@ def git_files_changed(cwd: Path, sha: str) -> list[str]:
     return [f for f in result.stdout.strip().split("\n") if f]
 
 
+_LOG_WITH_FILES_FORMAT = "---COMMIT---%n%H%n%an%n%ae%n%aI%n%s%n---BODY---%n%b%n---FILES---"
+
+
+def git_log_with_files(
+    cwd: Path,
+    max_count: int = 500,
+    since_sha: str | None = None,
+) -> str:
+    """Get git log with file lists in a single subprocess call.
+
+    Uses --name-only to append changed file names after each commit entry.
+    Returns raw output to be parsed by the caller.
+    """
+    args = [
+        "git", "log",
+        f"--max-count={max_count}",
+        f"--format={_LOG_WITH_FILES_FORMAT}",
+        "--name-only",
+    ]
+    if since_sha:
+        args.append(f"{since_sha}..HEAD")
+    result = safe_git_command(args, cwd=cwd, check=False)
+    return result.stdout
+
+
 def git_rev_parse_head(cwd: Path) -> str | None:
     """Get current HEAD SHA."""
     result = safe_git_command(["git", "rev-parse", "HEAD"], cwd=cwd, check=False)

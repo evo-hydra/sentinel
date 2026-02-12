@@ -50,6 +50,24 @@ def test_init_idempotent(tmp_git_repo: Path) -> None:
     assert result2.exit_code == 0
 
 
+def test_init_enrich_flag_without_provider(tmp_git_repo: Path) -> None:
+    """--enrich should gracefully skip if no API key is available."""
+    import os
+    # Ensure no API key is set to trigger the skip path
+    env_backup = {k: os.environ.pop(k, None) for k in (
+        "ANTHROPIC_API_KEY", "SENTINEL_API_KEY",
+    )}
+    try:
+        result = runner.invoke(app, ["init", str(tmp_git_repo), "--enrich"])
+        # Should succeed (enrichment skipped, not failed)
+        assert result.exit_code == 0
+        assert (tmp_git_repo / ".sentinel").exists()
+    finally:
+        for k, v in env_backup.items():
+            if v is not None:
+                os.environ[k] = v
+
+
 def test_version() -> None:
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0

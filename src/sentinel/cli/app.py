@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 
 from sentinel import __version__
 from sentinel.cli import theme
+
+if TYPE_CHECKING:
+    from sentinel.core.knowledge import KnowledgeStore
 
 app = typer.Typer(
     name="sentinel",
@@ -37,6 +41,7 @@ def init(
     path: Path | None = typer.Argument(None, help="Project path (default: current directory)."),
     deep: bool = typer.Option(False, "--deep", help="Deep scan (more commits)."),
     max_commits: int = typer.Option(500, "--max-commits", help="Maximum commits to analyze."),
+    enrich: bool = typer.Option(False, "--enrich", help="Run LLM-powered enrichment after analysis."),
 ) -> None:
     """Initialize Sentinel in a project. Creates .sentinel/ and learns from git history."""
     from sentinel.core.analyzer import GitAnalyzer
@@ -68,20 +73,11 @@ def init(
         analyzer = GitAnalyzer(git_root)
         results = analyzer.analyze_history(max_commits=max_commits)
 
-        for conv in results.conventions:
-            store.add_convention(conv)
-        for dec in results.decisions:
-            store.add_decision(dec)
-        for pit in results.pitfalls:
-            store.add_pitfall(pit)
-        for pat in results.patterns:
-            store.add_pattern(pat)
-        for hf in results.hot_files:
-            store.upsert_hot_file(hf)
-        for cc in results.co_changes:
-            store.upsert_co_change(cc)
-
+        store.store_results(results)
         store.record_swarm(results.last_sha or "", results.commits_analyzed)
+
+        if enrich:
+            _run_enrichment(store, results.commits, sentinel_dir)
 
         stats = store.stats()
 
@@ -98,7 +94,46 @@ def init(
     )
 
 
+def _run_enrichment(
+    store: KnowledgeStore,
+    commits: list[dict],
+    sentinel_dir: Path,
+) -> None:
+    """Run LLM enrichment on parsed commits and store results."""
+    from sentinel.core.config import SentinelConfig
+    from sentinel.core.enricher import CommitEnricher
+    from sentinel.core.llm_provider import LLMProviderError
+    from sentinel.core.provider_factory import create_enrich_provider
+
+    config = SentinelConfig.load(sentinel_dir)
+
+    if not commits:
+        theme.muted("No commits to enrich.")
+        return
+
+    try:
+        provider = create_enrich_provider(config)
+    except LLMProviderError as e:
+        theme.warn(f"Enrichment skipped: {e}")
+        return
+
+    enricher = CommitEnricher(provider, config)
+    theme.info(f"Enriching {len(commits)} commits with LLM...")
+
+    def on_progress(done: int, total: int) -> None:
+        theme.muted(f"  Batch {done}/{total} complete")
+
+    enriched = enricher.enrich(commits, on_progress=on_progress)
+    store.store_results(enriched)
+
+    theme.success(
+        f"Enrichment complete: +{len(enriched.decisions)} decisions, "
+        f"+{len(enriched.pitfalls)} pitfalls, +{len(enriched.conventions)} conventions"
+    )
+
+
 # Import and register sub-command groups
+from sentinel.cli.enrich import enrich  # noqa: E402
 from sentinel.cli.hive import hive_app  # noqa: E402
 from sentinel.cli.hunt import hunt  # noqa: E402
 from sentinel.cli.mcp_setup import mcp_setup  # noqa: E402
@@ -109,4 +144,5 @@ app.command()(hunt)
 app.command()(swarm)
 app.command()(watch)
 app.command(name="mcp-setup")(mcp_setup)
+app.command()(enrich)
 app.add_typer(hive_app, name="hive", help="Manage knowledge entries.")

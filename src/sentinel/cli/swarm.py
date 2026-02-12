@@ -14,6 +14,7 @@ def swarm(
     full: bool = typer.Option(False, "--full", help="Full rescan (ignore previous swarm state)."),
     max_commits: int = typer.Option(500, "--max-commits", help="Maximum commits to analyze."),
     json_output: bool = typer.Option(False, "--json", "-j", help="Output JSON."),
+    enrich: bool = typer.Option(False, "--enrich", help="Run LLM-powered enrichment after analysis."),
 ) -> None:
     """Analyze the repo and learn from git history."""
     from sentinel.core.analyzer import GitAnalyzer
@@ -47,21 +48,14 @@ def swarm(
         results = analyzer.analyze_history(max_commits=max_commits) if mode == "full" \
             else analyzer.analyze_incremental(since_sha, max_commits=max_commits)  # type: ignore[arg-type]
 
-        for conv in results.conventions:
-            store.add_convention(conv)
-        for dec in results.decisions:
-            store.add_decision(dec)
-        for pit in results.pitfalls:
-            store.add_pitfall(pit)
-        for pat in results.patterns:
-            store.add_pattern(pat)
-        for hf in results.hot_files:
-            store.upsert_hot_file(hf)
-        for cc in results.co_changes:
-            store.upsert_co_change(cc)
+        store.store_results(results)
 
         if results.last_sha:
             store.record_swarm(results.last_sha, results.commits_analyzed)
+
+        if enrich and not json_output:
+            from sentinel.cli.app import _run_enrichment
+            _run_enrichment(store, results.commits, sentinel_dir)
 
         stats = store.stats()
 

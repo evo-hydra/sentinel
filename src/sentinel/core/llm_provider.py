@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from abc import ABC, abstractmethod
 from typing import Any
 from urllib.error import URLError
 from urllib.request import Request, urlopen
+
+logger = logging.getLogger(__name__)
 
 
 class LLMProviderError(Exception):
@@ -126,6 +129,7 @@ class AnthropicProvider(LLMProvider):
             )
             return str(response.content[0].text)
         except Exception as exc:
+            logger.error("Anthropic API error: %s", exc)
             raise LLMProviderError(f"Anthropic API error: {exc}") from exc
 
 
@@ -232,4 +236,5 @@ class OpenAICompatibleProvider(LLMProvider):
                 )
             return str(response.choices[0].message.content or "")
         except Exception as exc:
+            logger.error("%s API error: %s", self._label, exc)
             raise LLMProviderError(f"{self._label} API error: {exc}") from exc

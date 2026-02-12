@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sentinel.models.enums import (
     ConventionCategory,
@@ -22,6 +23,13 @@ from sentinel.models.knowledge import (
     HotFile,
     Pitfall,
 )
+
+if TYPE_CHECKING:
+    from sentinel.models.knowledge import AnalysisResult
+
+logger = logging.getLogger(__name__)
+
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sentinel_meta (
@@ -50,7 +58,8 @@ CREATE TABLE IF NOT EXISTS decisions (
     author     TEXT NOT NULL DEFAULT '',
     decided_at TEXT NOT NULL,
     file_paths TEXT NOT NULL DEFAULT '[]',
-    tags       TEXT NOT NULL DEFAULT '[]'
+    tags       TEXT NOT NULL DEFAULT '[]',
+    source     TEXT NOT NULL DEFAULT 'git_history'
 );
 
 CREATE TABLE IF NOT EXISTS pitfalls (
@@ -63,7 +72,8 @@ CREATE TABLE IF NOT EXISTS pitfalls (
     evidence       TEXT NOT NULL DEFAULT '[]',
     frequency      INTEGER NOT NULL DEFAULT 1,
     first_seen     TEXT NOT NULL,
-    last_seen      TEXT NOT NULL
+    last_seen      TEXT NOT NULL,
+    source         TEXT NOT NULL DEFAULT 'git_history'
 );
 
 CREATE TABLE IF NOT EXISTS patterns (
@@ -109,6 +119,23 @@ CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
 """
 
 
+def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
+    """Add source column to decisions/pitfalls, add co_changes index."""
+    for table in ("decisions", "pitfalls"):
+        try:
+            conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN source TEXT NOT NULL DEFAULT 'git_history'"
+            )
+        except sqlite3.OperationalError:
+            logger.debug("Column 'source' already exists on %s, skipping", table)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_co_changes_file_b ON co_changes(file_b)")
+
+
+_MIGRATIONS: dict[int, Any] = {
+    1: _migrate_v1_to_v2,
+}
+
+
 class KnowledgeStore:
     """SQLite-backed knowledge store with FTS5 search."""
 
@@ -132,6 +159,7 @@ class KnowledgeStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._init_schema()
+        self._run_migrations()
 
     def close(self) -> None:
         if self._conn:
@@ -150,8 +178,45 @@ class KnowledgeStore:
         try:
             cur.executescript(_FTS_SCHEMA)
         except sqlite3.OperationalError:
-            pass  # FTS5 not available — degrade gracefully
+            logger.info("FTS5 not available — search will be disabled")
         self.conn.commit()
+
+    def _detect_schema_version(self) -> int:
+        """Detect schema version for DBs that predate the migration system."""
+        stored = self.get_meta("schema_version", "")
+        if stored:
+            return int(stored)
+        # No schema_version key — this is either a new DB or a pre-migration v1 DB.
+        # Check if the decisions table has a 'source' column (added in v2 schema).
+        cursor = self.conn.execute("PRAGMA table_info(decisions)")
+        columns = {row["name"] for row in cursor.fetchall()}
+        if "source" in columns:
+            # New DB created with latest schema
+            return SCHEMA_VERSION
+        # Old v1 DB
+        return 1
+
+    def _run_migrations(self) -> None:
+        """Run pending schema migrations from current version to SCHEMA_VERSION."""
+        current = self._detect_schema_version()
+        if current >= SCHEMA_VERSION:
+            self.set_meta("schema_version", str(SCHEMA_VERSION))
+            return
+
+        for version in range(current, SCHEMA_VERSION):
+            migrate_fn = _MIGRATIONS.get(version)
+            if migrate_fn is None:
+                logger.warning("No migration function for v%d → v%d", version, version + 1)
+                continue
+            try:
+                logger.info("Running migration v%d → v%d", version, version + 1)
+                migrate_fn(self.conn)
+                self.conn.commit()
+            except Exception:
+                logger.exception("Migration v%d → v%d failed", version, version + 1)
+                raise
+
+        self.set_meta("schema_version", str(SCHEMA_VERSION))
 
     # --- Metadata ---
 
@@ -212,10 +277,10 @@ class KnowledgeStore:
     def add_decision(self, d: Decision) -> None:
         self.conn.execute(
             """INSERT OR REPLACE INTO decisions
-            (id, summary, rationale, commit_sha, author, decided_at, file_paths, tags)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (id, summary, rationale, commit_sha, author, decided_at, file_paths, tags, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (d.id, d.summary, d.rationale, d.commit_sha, d.author,
-             d.decided_at, json.dumps(d.file_paths), json.dumps(d.tags)),
+             d.decided_at, json.dumps(d.file_paths), json.dumps(d.tags), d.source.value),
         )
         self._index_fts(d.id, KnowledgeType.DECISION, f"{d.summary} {d.rationale}")
         self.conn.commit()
@@ -236,6 +301,7 @@ class KnowledgeStore:
             decided_at=row["decided_at"],
             file_paths=json.loads(row["file_paths"]),
             tags=json.loads(row["tags"]),
+            source=KnowledgeSource(row["source"]),
         )
 
     # --- Pitfalls ---
@@ -244,11 +310,11 @@ class KnowledgeStore:
         self.conn.execute(
             """INSERT OR REPLACE INTO pitfalls
             (id, category, severity, description, code_pattern, how_to_prevent,
-             evidence, frequency, first_seen, last_seen)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             evidence, frequency, first_seen, last_seen, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (p.id, p.category.value, p.severity.value, p.description,
              p.code_pattern, p.how_to_prevent, json.dumps(p.evidence),
-             p.frequency, p.first_seen, p.last_seen),
+             p.frequency, p.first_seen, p.last_seen, p.source.value),
         )
         self._index_fts(p.id, KnowledgeType.PITFALL, f"{p.description} {p.how_to_prevent}")
         self.conn.commit()
@@ -277,6 +343,7 @@ class KnowledgeStore:
             frequency=row["frequency"],
             first_seen=row["first_seen"],
             last_seen=row["last_seen"],
+            source=KnowledgeSource(row["source"]),
         )
 
     # --- Patterns ---
@@ -405,7 +472,7 @@ class KnowledgeStore:
                 (knowledge_id, ktype.value, content),
             )
         except sqlite3.OperationalError:
-            pass  # FTS5 not available
+            logger.debug("FTS5 index failed for %s", knowledge_id)
 
     def search(self, query: str, ktype: KnowledgeType | None = None,
                limit: int = 20) -> list[dict[str, str]]:
@@ -430,6 +497,91 @@ class KnowledgeStore:
                     for r in rows]
         except sqlite3.OperationalError:
             return []
+
+    # --- Batch storage ---
+
+    def store_results(self, results: AnalysisResult) -> None:
+        """Store all analysis results in a single transaction."""
+        with self.conn:
+            for conv in results.conventions:
+                self._add_convention_no_commit(conv)
+            for dec in results.decisions:
+                self._add_decision_no_commit(dec)
+            for pit in results.pitfalls:
+                self._add_pitfall_no_commit(pit)
+            for pat in results.patterns:
+                self._add_pattern_no_commit(pat)
+            for hf in results.hot_files:
+                self._upsert_hot_file_no_commit(hf)
+            for cc in results.co_changes:
+                self._upsert_co_change_no_commit(cc)
+
+    def _add_convention_no_commit(self, c: Convention) -> None:
+        self.conn.execute(
+            """INSERT OR REPLACE INTO conventions
+            (id, category, pattern, description, evidence, confidence, frequency, first_seen, last_seen, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (c.id, c.category.value, c.pattern, c.description,
+             json.dumps(c.evidence), c.confidence, c.frequency,
+             c.first_seen, c.last_seen, c.source.value),
+        )
+        self._index_fts(c.id, KnowledgeType.CONVENTION, f"{c.pattern} {c.description}")
+
+    def _add_decision_no_commit(self, d: Decision) -> None:
+        self.conn.execute(
+            """INSERT OR REPLACE INTO decisions
+            (id, summary, rationale, commit_sha, author, decided_at, file_paths, tags, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (d.id, d.summary, d.rationale, d.commit_sha, d.author,
+             d.decided_at, json.dumps(d.file_paths), json.dumps(d.tags), d.source.value),
+        )
+        self._index_fts(d.id, KnowledgeType.DECISION, f"{d.summary} {d.rationale}")
+
+    def _add_pitfall_no_commit(self, p: Pitfall) -> None:
+        self.conn.execute(
+            """INSERT OR REPLACE INTO pitfalls
+            (id, category, severity, description, code_pattern, how_to_prevent,
+             evidence, frequency, first_seen, last_seen, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (p.id, p.category.value, p.severity.value, p.description,
+             p.code_pattern, p.how_to_prevent, json.dumps(p.evidence),
+             p.frequency, p.first_seen, p.last_seen, p.source.value),
+        )
+        self._index_fts(p.id, KnowledgeType.PITFALL, f"{p.description} {p.how_to_prevent}")
+
+    def _add_pattern_no_commit(self, p: CodePattern) -> None:
+        self.conn.execute(
+            """INSERT OR REPLACE INTO patterns
+            (id, name, description, ast_pattern, file_glob, frequency, examples)
+            VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (p.id, p.name, p.description, p.ast_pattern,
+             p.file_glob, p.frequency, json.dumps(p.examples)),
+        )
+        self._index_fts(p.id, KnowledgeType.PATTERN, f"{p.name} {p.description}")
+
+    def _upsert_hot_file_no_commit(self, hf: HotFile) -> None:
+        self.conn.execute(
+            """INSERT INTO hot_files (file_path, change_count, bug_fix_count, revert_count, churn_score)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(file_path) DO UPDATE SET
+                change_count = change_count + excluded.change_count,
+                bug_fix_count = bug_fix_count + excluded.bug_fix_count,
+                revert_count = revert_count + excluded.revert_count,
+                churn_score = (change_count + excluded.change_count)
+                    + (bug_fix_count + excluded.bug_fix_count) * 3
+                    + (revert_count + excluded.revert_count) * 5""",
+            (hf.file_path, hf.change_count, hf.bug_fix_count, hf.revert_count, hf.churn_score),
+        )
+
+    def _upsert_co_change_no_commit(self, cc: CoChange) -> None:
+        a, b = sorted([cc.file_a, cc.file_b])
+        self.conn.execute(
+            """INSERT INTO co_changes (file_a, file_b, change_count)
+            VALUES (?, ?, ?)
+            ON CONFLICT(file_a, file_b) DO UPDATE SET
+                change_count = change_count + excluded.change_count""",
+            (a, b, cc.change_count),
+        )
 
     # --- Stats ---
 

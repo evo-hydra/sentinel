@@ -211,7 +211,8 @@ def format_pitfalls(pitfalls: list[Pitfall]) -> str:
             "info": "   ",
         }.get(p.severity.value, "   ")
 
-        parts.append(f"- {severity_icon} **[{p.severity.value}]** {p.description}")
+        source_tag = f" [{p.source.value}]" if p.source.value != "git_history" else ""
+        parts.append(f"- {severity_icon} **[{p.severity.value}]** {p.description}{source_tag}")
         if p.how_to_prevent:
             parts.append(f"  *Prevent:* {p.how_to_prevent}")
         if p.code_pattern:
@@ -237,6 +238,7 @@ def format_decisions(decisions: list[Decision]) -> str:
             meta.append(f"Date: {d.decided_at[:10]}")
         if d.tags:
             meta.append(f"Tags: {', '.join(d.tags)}")
+        meta.append(f"Source: {d.source.value}")
         if meta:
             parts.append(f"*{' | '.join(meta)}*\n")
         if d.file_paths:

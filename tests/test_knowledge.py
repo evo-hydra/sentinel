@@ -12,7 +12,15 @@ from sentinel.models.enums import (
     PitfallCategory,
     Severity,
 )
-from sentinel.models.knowledge import CoChange, CodePattern, Convention, Decision, HotFile, Pitfall
+from sentinel.models.knowledge import (
+    AnalysisResult,
+    CoChange,
+    CodePattern,
+    Convention,
+    Decision,
+    HotFile,
+    Pitfall,
+)
 
 
 def test_open_close(tmp_path: Path) -> None:
@@ -232,3 +240,55 @@ def test_stats(knowledge_store: KnowledgeStore) -> None:
     assert s["decisions"] == 1
     assert s["pitfalls"] == 1
     assert s["hot_files"] == 1
+
+
+def test_store_results_batch(knowledge_store: KnowledgeStore) -> None:
+    """store_results() should insert all items in a single transaction."""
+    results = AnalysisResult(
+        conventions=[
+            Convention(category=ConventionCategory.NAMING, pattern="snake", description="test"),
+            Convention(category=ConventionCategory.COMMIT, pattern="conventional", description="test"),
+        ],
+        decisions=[Decision(summary="Use SQLite")],
+        pitfalls=[Pitfall(description="Off-by-one error")],
+        hot_files=[HotFile(file_path="x.py", change_count=3, churn_score=3)],
+        co_changes=[CoChange(file_a="a.py", file_b="b.py", change_count=5)],
+        commits_analyzed=10,
+    )
+    knowledge_store.store_results(results)
+
+    assert len(knowledge_store.get_conventions()) == 2
+    assert len(knowledge_store.get_decisions()) == 1
+    assert len(knowledge_store.get_pitfalls()) == 1
+    assert len(knowledge_store.get_hot_files()) == 1
+    assert len(knowledge_store.get_co_changes("a.py", min_count=1)) == 1
+
+
+def test_decision_source_column(knowledge_store: KnowledgeStore) -> None:
+    """Decisions should store and retrieve the source field."""
+    knowledge_store.add_decision(Decision(
+        summary="Use React", source=KnowledgeSource.INFERRED,
+    ))
+    knowledge_store.add_decision(Decision(
+        summary="Use FastAPI", source=KnowledgeSource.GIT_HISTORY,
+    ))
+
+    decisions = knowledge_store.get_decisions()
+    sources = {d.summary: d.source for d in decisions}
+    assert sources["Use React"] == KnowledgeSource.INFERRED
+    assert sources["Use FastAPI"] == KnowledgeSource.GIT_HISTORY
+
+
+def test_pitfall_source_column(knowledge_store: KnowledgeStore) -> None:
+    """Pitfalls should store and retrieve the source field."""
+    knowledge_store.add_pitfall(Pitfall(
+        description="Bug found by LLM", source=KnowledgeSource.INFERRED,
+    ))
+    knowledge_store.add_pitfall(Pitfall(
+        description="Bug from revert", source=KnowledgeSource.GIT_HISTORY,
+    ))
+
+    pitfalls = knowledge_store.get_pitfalls()
+    sources = {p.description: p.source for p in pitfalls}
+    assert sources["Bug found by LLM"] == KnowledgeSource.INFERRED
+    assert sources["Bug from revert"] == KnowledgeSource.GIT_HISTORY
