@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 
 from sentinel.cli import theme
 from sentinel.cli.output import emit
 from sentinel.models.enums import KnowledgeType
+
+if TYPE_CHECKING:
+    from sentinel.core.knowledge import KnowledgeStore
 
 hive_app = typer.Typer(
     name="hive",
@@ -189,11 +193,18 @@ def hive_add(
         theme.success(f"Added {ktype}: {entry_id[:8]}...")
 
 
+def _is_fts5_query(query: str) -> bool:
+    """Heuristic: detect if query uses FTS5 syntax operators."""
+    fts5_markers = ("AND", "OR", "NOT", '"', "*", "^", "NEAR")
+    return any(marker in query for marker in fts5_markers)
+
+
 @hive_app.command("search")
 def hive_search(
-    query: str = typer.Argument(..., help="Search query (FTS5 syntax)."),
+    query: str = typer.Argument(..., help="Search query (FTS5 syntax or natural language)."),
     ktype: str | None = typer.Option(None, "--type", "-t", help="Filter by type."),
     limit: int = typer.Option(20, "--limit", "-l", help="Max results."),
+    semantic: bool = typer.Option(False, "--semantic", "-s", help="Use semantic (embedding-based) search."),
     json_output: bool = typer.Option(False, "--json", "-j", help="Output JSON."),
 ) -> None:
     """Full-text search across all knowledge entries."""
@@ -201,7 +212,18 @@ def hive_search(
 
     with store:
         kt = KnowledgeType(ktype) if ktype else None
-        results = store.search(query, ktype=kt, limit=limit)
+
+        # Auto-detect: use semantic if requested or if embeddings exist and query isn't FTS5
+        use_semantic = semantic
+        if not use_semantic and store.has_embeddings() and not _is_fts5_query(query):
+            use_semantic = True
+
+        if use_semantic and store.has_embeddings():
+            results = _semantic_search(store, query, kt, limit)
+        else:
+            if use_semantic:
+                theme.muted("No embeddings found. Falling back to FTS5 search.")
+            results = store.search(query, ktype=kt, limit=limit)
 
     if json_output:
         emit(results, json_mode=True)
@@ -211,8 +233,39 @@ def hive_search(
             return
 
         for r in results:
+            sim = r.get("similarity")
+            sim_str = f" [{sim:.0%}]" if sim is not None else ""
             theme.console.print(
-                f"  [sentinel.accent]{r['type']:12}[/] {r['id'][:8]}… "
+                f"  [sentinel.accent]{r['type']:12}[/] {r['id'][:8]}…{sim_str} "
                 f"{r['snippet']}"
             )
-        theme.muted(f"\n  {len(results)} results.")
+        search_mode = "semantic" if use_semantic and store.has_embeddings() else "FTS5"
+        theme.muted(f"\n  {len(results)} results ({search_mode} search).")
+
+
+def _semantic_search(
+    store: KnowledgeStore,
+    query: str,
+    kt: KnowledgeType | None,
+    limit: int,
+) -> list[dict]:
+    """Run semantic search with graceful fallback to FTS5."""
+    from sentinel.core.config import SentinelConfig
+    from sentinel.core.embedding_provider import EmbeddingProviderError
+    from sentinel.core.git import find_git_root
+    from sentinel.core.provider_factory import create_embedding_provider
+
+    git_root = find_git_root(Path.cwd())
+    if git_root is None:
+        return store.search(query, ktype=kt, limit=limit)
+
+    sentinel_dir = git_root / ".sentinel"
+    config = SentinelConfig.load(sentinel_dir)
+
+    try:
+        provider = create_embedding_provider(config)
+        query_vec = provider.embed(query)
+        return store.semantic_search(query_vec, ktype=kt, limit=limit)
+    except EmbeddingProviderError:
+        theme.muted("Embedding provider unavailable. Falling back to FTS5 search.")
+        return store.search(query, ktype=kt, limit=limit)

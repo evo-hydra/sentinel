@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sqlite3
+import struct
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -30,7 +32,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sentinel_meta (
@@ -134,6 +136,15 @@ CREATE TABLE IF NOT EXISTS shared_patterns (
     source_project  TEXT NOT NULL DEFAULT '',
     imported_at     TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS embeddings (
+    knowledge_id   TEXT PRIMARY KEY,
+    knowledge_type TEXT NOT NULL,
+    embedding      BLOB NOT NULL,
+    model          TEXT NOT NULL,
+    created_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_embeddings_type ON embeddings(knowledge_type);
 
 """
 
@@ -262,11 +273,26 @@ def _migrate_v4_to_v5(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_v5_to_v6(conn: sqlite3.Connection) -> None:
+    """Add embeddings table for semantic search."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS embeddings (
+            knowledge_id   TEXT PRIMARY KEY,
+            knowledge_type TEXT NOT NULL,
+            embedding      BLOB NOT NULL,
+            model          TEXT NOT NULL,
+            created_at     TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_embeddings_type ON embeddings(knowledge_type);
+    """)
+
+
 _MIGRATIONS: dict[int, Any] = {
     1: _migrate_v1_to_v2,
     2: _migrate_v2_to_v3,
     3: _migrate_v3_to_v4,
     4: _migrate_v4_to_v5,
+    5: _migrate_v5_to_v6,
 }
 
 
@@ -330,15 +356,26 @@ class KnowledgeStore:
         columns = {row["name"] for row in cursor.fetchall()}
         if "source" not in columns:
             return 1  # Old v1 DB
-        # Has source column — check if feedback/shared_patterns exist (new DB with latest schema)
+        # Has source column — check structural markers to infer version
         tables = {
             row[0]
             for row in self.conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()
         }
-        if "shared_patterns" in tables:
+        if "embeddings" in tables:
             return SCHEMA_VERSION
+        if "shared_patterns" in tables:
+            # Could be v4 or v5 — check for content indexes
+            indexes = {
+                row[0]
+                for row in self.conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index'"
+                ).fetchall()
+            }
+            if "idx_convention_content" in indexes:
+                return 5
+            return 4
         if "feedback" in tables:
             return 3
         # Has source but no feedback table — v2 DB or new DB created with old schema
@@ -880,7 +917,7 @@ class KnowledgeStore:
 
     _KNOWN_TABLES = frozenset(
         {"conventions", "decisions", "pitfalls", "patterns", "hot_files", "co_changes",
-         "feedback", "shared_patterns"}
+         "feedback", "shared_patterns", "embeddings"}
     )
 
     def stats(self) -> dict[str, int]:
@@ -901,3 +938,155 @@ class KnowledgeStore:
 
     def all_patterns(self) -> list[CodePattern]:
         return self.get_patterns(limit=10000)
+
+    # --- Embeddings ---
+
+    def store_embedding(
+        self, knowledge_id: str, knowledge_type: str, embedding: list[float], model: str,
+    ) -> None:
+        """Store an embedding vector as a packed BLOB."""
+        from datetime import datetime, timezone
+
+        blob = struct.pack(f"{len(embedding)}f", *embedding)
+        now = datetime.now(tz=timezone.utc).isoformat()
+        self.conn.execute(
+            """INSERT OR REPLACE INTO embeddings
+            (knowledge_id, knowledge_type, embedding, model, created_at)
+            VALUES (?, ?, ?, ?, ?)""",
+            (knowledge_id, knowledge_type, blob, model, now),
+        )
+        self.conn.commit()
+
+    def get_embedding(self, knowledge_id: str) -> tuple[list[float], str] | None:
+        """Retrieve an embedding vector and its model name."""
+        row = self.conn.execute(
+            "SELECT embedding, model FROM embeddings WHERE knowledge_id = ?",
+            (knowledge_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        blob = row["embedding"]
+        n = len(blob) // 4  # float32 = 4 bytes
+        vec = list(struct.unpack(f"{n}f", blob))
+        return vec, row["model"]
+
+    def has_embeddings(self) -> bool:
+        """Check if any embeddings exist."""
+        row = self.conn.execute("SELECT COUNT(*) as cnt FROM embeddings").fetchone()
+        return (row["cnt"] if row else 0) > 0
+
+    def count_embeddings(self, knowledge_type: str | None = None) -> int:
+        """Count embeddings, optionally filtered by type."""
+        if knowledge_type:
+            row = self.conn.execute(
+                "SELECT COUNT(*) as cnt FROM embeddings WHERE knowledge_type = ?",
+                (knowledge_type,),
+            ).fetchone()
+        else:
+            row = self.conn.execute("SELECT COUNT(*) as cnt FROM embeddings").fetchone()
+        return row["cnt"] if row else 0
+
+    def get_all_embeddings(
+        self, knowledge_type: str | None = None,
+    ) -> list[tuple[str, str, list[float]]]:
+        """Load all embeddings, optionally filtered by type.
+
+        Returns list of (knowledge_id, knowledge_type, vector).
+        """
+        if knowledge_type:
+            rows = self.conn.execute(
+                "SELECT knowledge_id, knowledge_type, embedding FROM embeddings WHERE knowledge_type = ?",
+                (knowledge_type,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT knowledge_id, knowledge_type, embedding FROM embeddings"
+            ).fetchall()
+        result = []
+        for row in rows:
+            blob = row["embedding"]
+            n = len(blob) // 4
+            vec = list(struct.unpack(f"{n}f", blob))
+            result.append((row["knowledge_id"], row["knowledge_type"], vec))
+        return result
+
+    def semantic_search(
+        self,
+        query_embedding: list[float],
+        ktype: KnowledgeType | None = None,
+        limit: int = 20,
+        offset: int = 0,
+        min_similarity: float = 0.0,
+    ) -> list[dict[str, Any]]:
+        """Search knowledge by cosine similarity to a query embedding.
+
+        Returns list of {"id", "type", "similarity", "snippet"} dicts,
+        sorted by similarity DESC.
+        """
+        all_embs = self.get_all_embeddings(
+            knowledge_type=ktype.value if ktype else None,
+        )
+
+        scored: list[tuple[str, str, float]] = []
+        for kid, ktype_str, vec in all_embs:
+            sim = _cosine_similarity(query_embedding, vec)
+            if sim >= min_similarity:
+                scored.append((kid, ktype_str, sim))
+
+        scored.sort(key=lambda x: x[2], reverse=True)
+        page = scored[offset: offset + limit]
+
+        results: list[dict[str, Any]] = []
+        for kid, ktype_str, sim in page:
+            snippet = self._get_content_for_id(kid, ktype_str)
+            results.append({
+                "id": kid,
+                "type": ktype_str,
+                "similarity": round(sim, 4),
+                "snippet": snippet,
+            })
+        return results
+
+    def _get_content_for_id(self, knowledge_id: str, ktype: str) -> str:
+        """Fetch display text for a knowledge entry from its source table."""
+        if ktype == "convention":
+            row = self.conn.execute(
+                "SELECT pattern, description FROM conventions WHERE id = ?",
+                (knowledge_id,),
+            ).fetchone()
+            if row:
+                return f"{row['pattern']} — {row['description']}" if row["description"] else row["pattern"]
+        elif ktype == "decision":
+            row = self.conn.execute(
+                "SELECT summary, rationale FROM decisions WHERE id = ?",
+                (knowledge_id,),
+            ).fetchone()
+            if row:
+                return str(row["summary"])
+        elif ktype == "pitfall":
+            row = self.conn.execute(
+                "SELECT description, how_to_prevent FROM pitfalls WHERE id = ?",
+                (knowledge_id,),
+            ).fetchone()
+            if row:
+                return str(row["description"])
+        elif ktype == "pattern":
+            row = self.conn.execute(
+                "SELECT name, description FROM patterns WHERE id = ?",
+                (knowledge_id,),
+            ).fetchone()
+            if row:
+                return f"{row['name']} — {row['description']}" if row["description"] else row["name"]
+        return f"[{ktype}] {knowledge_id[:8]}..."
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Compute cosine similarity between two vectors."""
+    if len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
+    mag_a = math.sqrt(sum(x * x for x in a))
+    mag_b = math.sqrt(sum(x * x for x in b))
+    if mag_a == 0.0 or mag_b == 0.0:
+        return 0.0
+    return dot / (mag_a * mag_b)

@@ -1,8 +1,14 @@
-"""Provider factory — creates LLM providers from config without CLI dependencies."""
+"""Provider factory — creates LLM/embedding providers from config without CLI dependencies."""
 
 from __future__ import annotations
 
 from sentinel.core.config import SentinelConfig
+from sentinel.core.embedding_provider import (
+    EmbeddingProvider,
+    EmbeddingProviderError,
+    OllamaEmbeddingProvider,
+    OpenAIEmbeddingProvider,
+)
 from sentinel.core.llm_provider import (
     AnthropicProvider,
     LLMProvider,
@@ -70,3 +76,26 @@ def create_enrich_provider(config: SentinelConfig) -> LLMProvider:
         config.enrich_provider, config.enrich_model,
         max_tokens=4096, timeout=config.llm_timeout,
     )
+
+
+def create_embedding_provider(config: SentinelConfig) -> EmbeddingProvider:
+    """Create the appropriate embedding provider based on config.
+
+    Supported providers: ollama, openai.
+    """
+    if config.embed_provider == "ollama":
+        return OllamaEmbeddingProvider(
+            model=config.embed_model,
+            base_url=config.llm_ollama_url,
+            timeout=config.llm_timeout,
+        )
+    elif config.embed_provider == "openai":
+        return OpenAIEmbeddingProvider(
+            model=config.embed_model,
+            timeout=config.llm_timeout,
+        )
+    else:
+        raise EmbeddingProviderError(
+            f"Unknown embedding provider: {config.embed_provider}. "
+            f"Supported: ollama, openai"
+        )

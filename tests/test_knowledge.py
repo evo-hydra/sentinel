@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
-from sentinel.core.knowledge import KnowledgeStore
+from sentinel.core.knowledge import KnowledgeStore, _cosine_similarity
 from sentinel.models.enums import (
     ConventionCategory,
     KnowledgeSource,
@@ -520,3 +521,194 @@ def test_pattern_dedup_on_reinsert(knowledge_store: KnowledgeStore) -> None:
     assert pats[0].frequency == 3  # took max
     assert pats[0].file_glob == "**/*.py"  # updated
     assert pats[0].examples == ["new example"]  # updated
+
+
+# --- Embedding tests ---
+
+
+def test_store_and_get_embedding(knowledge_store: KnowledgeStore) -> None:
+    """Round-trip: store embedding as BLOB and retrieve it."""
+    vec = [0.1, 0.2, 0.3, 0.4, 0.5]
+    knowledge_store.store_embedding("conv-1", "convention", vec, "test-model")
+
+    result = knowledge_store.get_embedding("conv-1")
+    assert result is not None
+    retrieved_vec, model = result
+    assert model == "test-model"
+    assert len(retrieved_vec) == 5
+    for a, b in zip(vec, retrieved_vec, strict=True):
+        assert abs(a - b) < 1e-6  # float32 precision
+
+
+def test_get_embedding_missing(knowledge_store: KnowledgeStore) -> None:
+    """get_embedding should return None for missing IDs."""
+    assert knowledge_store.get_embedding("nonexistent") is None
+
+
+def test_store_embedding_replace(knowledge_store: KnowledgeStore) -> None:
+    """Storing an embedding for the same ID should replace it."""
+    knowledge_store.store_embedding("conv-1", "convention", [0.1, 0.2], "model-a")
+    knowledge_store.store_embedding("conv-1", "convention", [0.3, 0.4], "model-b")
+
+    result = knowledge_store.get_embedding("conv-1")
+    assert result is not None
+    vec, model = result
+    assert model == "model-b"
+    assert abs(vec[0] - 0.3) < 1e-6
+
+
+def test_has_embeddings(knowledge_store: KnowledgeStore) -> None:
+    """has_embeddings should reflect whether any embeddings exist."""
+    assert not knowledge_store.has_embeddings()
+    knowledge_store.store_embedding("conv-1", "convention", [0.1], "model")
+    assert knowledge_store.has_embeddings()
+
+
+def test_count_embeddings(knowledge_store: KnowledgeStore) -> None:
+    """count_embeddings should count all or by type."""
+    assert knowledge_store.count_embeddings() == 0
+    knowledge_store.store_embedding("conv-1", "convention", [0.1], "model")
+    knowledge_store.store_embedding("pit-1", "pitfall", [0.2], "model")
+    assert knowledge_store.count_embeddings() == 2
+    assert knowledge_store.count_embeddings("convention") == 1
+    assert knowledge_store.count_embeddings("pitfall") == 1
+    assert knowledge_store.count_embeddings("decision") == 0
+
+
+def test_get_all_embeddings(knowledge_store: KnowledgeStore) -> None:
+    """get_all_embeddings should return all stored embeddings."""
+    knowledge_store.store_embedding("conv-1", "convention", [0.1, 0.2], "model")
+    knowledge_store.store_embedding("pit-1", "pitfall", [0.3, 0.4], "model")
+
+    all_embs = knowledge_store.get_all_embeddings()
+    assert len(all_embs) == 2
+
+    conv_embs = knowledge_store.get_all_embeddings("convention")
+    assert len(conv_embs) == 1
+    assert conv_embs[0][0] == "conv-1"
+
+
+def test_semantic_search(knowledge_store: KnowledgeStore) -> None:
+    """semantic_search should return results sorted by similarity."""
+    # Add some conventions to get snippets from
+    knowledge_store.add_convention(Convention(
+        id="conv-auth", category=ConventionCategory.NAMING,
+        pattern="authentication", description="Auth module conventions",
+    ))
+    knowledge_store.add_convention(Convention(
+        id="conv-db", category=ConventionCategory.NAMING,
+        pattern="database", description="Database conventions",
+    ))
+
+    # Store embeddings — conv-auth closer to query
+    knowledge_store.store_embedding("conv-auth", "convention", [0.9, 0.1, 0.0], "model")
+    knowledge_store.store_embedding("conv-db", "convention", [0.1, 0.9, 0.0], "model")
+
+    # Query embedding close to conv-auth
+    query = [0.95, 0.05, 0.0]
+    results = knowledge_store.semantic_search(query, limit=10)
+
+    assert len(results) == 2
+    assert results[0]["id"] == "conv-auth"
+    assert results[0]["similarity"] > results[1]["similarity"]
+    assert "authentication" in results[0]["snippet"]
+
+
+def test_semantic_search_type_filter(knowledge_store: KnowledgeStore) -> None:
+    """semantic_search with ktype should only return matching types."""
+    knowledge_store.add_convention(Convention(
+        id="conv-1", category=ConventionCategory.NAMING,
+        pattern="test", description="Test conv",
+    ))
+    knowledge_store.add_pitfall(Pitfall(
+        id="pit-1", description="Test pitfall",
+    ))
+
+    knowledge_store.store_embedding("conv-1", "convention", [1.0, 0.0], "model")
+    knowledge_store.store_embedding("pit-1", "pitfall", [0.9, 0.1], "model")
+
+    results = knowledge_store.semantic_search(
+        [1.0, 0.0], ktype=KnowledgeType.CONVENTION, limit=10,
+    )
+    assert len(results) == 1
+    assert results[0]["type"] == "convention"
+
+
+def test_semantic_search_min_similarity(knowledge_store: KnowledgeStore) -> None:
+    """semantic_search with min_similarity should filter low matches."""
+    knowledge_store.add_convention(Convention(
+        id="conv-1", category=ConventionCategory.NAMING,
+        pattern="test", description="Test",
+    ))
+    knowledge_store.store_embedding("conv-1", "convention", [0.0, 1.0], "model")
+
+    # Orthogonal query — very low similarity
+    results = knowledge_store.semantic_search([1.0, 0.0], min_similarity=0.5)
+    assert len(results) == 0
+
+
+def test_semantic_search_pagination(knowledge_store: KnowledgeStore) -> None:
+    """semantic_search should support limit/offset."""
+    for i in range(5):
+        knowledge_store.add_convention(Convention(
+            id=f"conv-{i}", category=ConventionCategory.NAMING,
+            pattern=f"pattern_{i}", description=f"desc_{i}",
+        ))
+        knowledge_store.store_embedding(
+            f"conv-{i}", "convention", [float(i) / 5.0, 1.0 - float(i) / 5.0], "model",
+        )
+
+    page1 = knowledge_store.semantic_search([1.0, 0.0], limit=2, offset=0)
+    page2 = knowledge_store.semantic_search([1.0, 0.0], limit=2, offset=2)
+    assert len(page1) == 2
+    assert len(page2) == 2
+    assert page1[0]["id"] != page2[0]["id"]
+
+
+# --- Cosine similarity tests ---
+
+
+def test_cosine_similarity_identical() -> None:
+    """Identical vectors should have similarity ~1.0."""
+    assert abs(_cosine_similarity([1.0, 0.0, 0.0], [1.0, 0.0, 0.0]) - 1.0) < 1e-6
+
+
+def test_cosine_similarity_orthogonal() -> None:
+    """Orthogonal vectors should have similarity ~0.0."""
+    assert abs(_cosine_similarity([1.0, 0.0], [0.0, 1.0])) < 1e-6
+
+
+def test_cosine_similarity_opposite() -> None:
+    """Opposite vectors should have similarity ~-1.0."""
+    assert abs(_cosine_similarity([1.0, 0.0], [-1.0, 0.0]) - (-1.0)) < 1e-6
+
+
+def test_cosine_similarity_zero_vector() -> None:
+    """Zero vector should return 0.0 similarity."""
+    assert _cosine_similarity([0.0, 0.0], [1.0, 0.0]) == 0.0
+    assert _cosine_similarity([1.0, 0.0], [0.0, 0.0]) == 0.0
+
+
+def test_cosine_similarity_different_lengths() -> None:
+    """Vectors of different lengths should return 0.0."""
+    assert _cosine_similarity([1.0, 0.0], [1.0, 0.0, 0.0]) == 0.0
+
+
+def test_cosine_similarity_known_value() -> None:
+    """Test against a known computed value."""
+    a = [1.0, 2.0, 3.0]
+    b = [4.0, 5.0, 6.0]
+    # dot=32, |a|=sqrt(14), |b|=sqrt(77)
+    expected = 32.0 / (math.sqrt(14) * math.sqrt(77))
+    assert abs(_cosine_similarity(a, b) - expected) < 1e-6
+
+
+def test_stats_includes_embeddings(knowledge_store: KnowledgeStore) -> None:
+    """stats() should include embeddings count."""
+    s = knowledge_store.stats()
+    assert "embeddings" in s
+    assert s["embeddings"] == 0
+
+    knowledge_store.store_embedding("conv-1", "convention", [0.1], "model")
+    s = knowledge_store.stats()
+    assert s["embeddings"] == 1

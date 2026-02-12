@@ -188,7 +188,9 @@ def format_query_results(
 
     parts: list[str] = [f"## Search Results for `{query}`\n"]
     for r in results:
-        parts.append(f"- **[{r['type']}]** {r['snippet']}")
+        sim = r.get("similarity")
+        sim_str = f" ({sim:.0%} match)" if sim is not None else ""
+        parts.append(f"- **[{r['type']}]** {r['snippet']}{sim_str}")
 
     footer = _pagination_footer(len(results), total, offset)
     if footer:

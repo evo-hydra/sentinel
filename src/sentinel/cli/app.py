@@ -42,6 +42,7 @@ def init(
     deep: bool = typer.Option(False, "--deep", help="Deep scan (more commits)."),
     max_commits: int = typer.Option(500, "--max-commits", help="Maximum commits to analyze."),
     enrich: bool = typer.Option(False, "--enrich", help="Run LLM-powered enrichment after analysis."),
+    embed: bool = typer.Option(False, "--embed", help="Generate embeddings for semantic search after analysis."),
 ) -> None:
     """Initialize Sentinel in a project. Creates .sentinel/ and learns from git history."""
     from sentinel.core.analyzer import GitAnalyzer
@@ -78,6 +79,9 @@ def init(
 
         if enrich:
             _run_enrichment(store, results.commits, sentinel_dir)
+
+        if embed:
+            _run_embedding(store, sentinel_dir)
 
         stats = store.stats()
 
@@ -132,7 +136,63 @@ def _run_enrichment(
     )
 
 
+def _run_embedding(store: KnowledgeStore, sentinel_dir: Path) -> None:
+    """Generate embeddings for all knowledge entries."""
+    from sentinel.core.config import SentinelConfig
+    from sentinel.core.embedding_provider import EmbeddingProviderError
+    from sentinel.core.provider_factory import create_embedding_provider
+
+    config = SentinelConfig.load(sentinel_dir)
+
+    try:
+        provider = create_embedding_provider(config)
+    except EmbeddingProviderError as e:
+        theme.warn(f"Embedding skipped: {e}")
+        return
+
+    entries: list[tuple[str, str, str]] = []
+    for c in store.get_conventions(limit=10000):
+        entries.append((c.id, "convention", f"{c.pattern} {c.description}"))
+    for d in store.get_decisions(limit=10000):
+        entries.append((d.id, "decision", f"{d.summary} {d.rationale}"))
+    for pit in store.get_pitfalls(limit=10000):
+        entries.append((pit.id, "pitfall", f"{pit.description} {pit.how_to_prevent}"))
+    for pat in store.get_patterns(limit=10000):
+        entries.append((pat.id, "pattern", f"{pat.name} {pat.description}"))
+
+    if not entries:
+        theme.muted("No entries to embed.")
+        return
+
+    # Skip already-embedded entries
+    existing = {
+        row[0]
+        for row in store.conn.execute("SELECT knowledge_id FROM embeddings").fetchall()
+    }
+    entries = [(eid, etype, text) for eid, etype, text in entries if eid not in existing]
+
+    if not entries:
+        theme.muted("All entries already embedded.")
+        return
+
+    theme.info(f"Embedding {len(entries)} entries with {config.embed_provider}/{config.embed_model}...")
+    bs = config.embed_batch_size
+    for i in range(0, len(entries), bs):
+        batch = entries[i: i + bs]
+        texts = [text for _, _, text in batch]
+        try:
+            vectors = provider.embed_batch(texts)
+        except EmbeddingProviderError as e:
+            theme.warn(f"Embedding batch failed: {e}")
+            return
+        for (eid, etype, _), vec in zip(batch, vectors, strict=True):
+            store.store_embedding(eid, etype, vec, provider.model_name)
+
+    theme.success(f"Embedded {len(entries)} knowledge entries.")
+
+
 # Import and register sub-command groups
+from sentinel.cli.embed import embed as embed_cmd  # noqa: E402
 from sentinel.cli.enrich import enrich  # noqa: E402
 from sentinel.cli.feedback import feedback_app  # noqa: E402
 from sentinel.cli.hive import hive_app  # noqa: E402
@@ -148,6 +208,7 @@ app.command()(swarm)
 app.command()(watch)
 app.command(name="mcp-setup")(mcp_setup)
 app.command()(enrich)
+app.command()(embed_cmd)
 app.command(name="pr-review")(pr_review)
 app.add_typer(hive_app, name="hive", help="Manage knowledge entries.")
 app.add_typer(feedback_app, name="feedback", help="Submit and view feedback on knowledge entries.")

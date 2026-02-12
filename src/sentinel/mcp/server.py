@@ -70,6 +70,30 @@ def _no_sentinel_msg() -> str:
     )
 
 
+def _semantic_query(
+    store: KnowledgeStore,
+    query: str,
+    limit: int = 20,
+    offset: int = 0,
+) -> list[dict]:
+    """Run semantic search with graceful fallback to FTS5."""
+    from sentinel.core.config import SentinelConfig
+    from sentinel.core.embedding_provider import EmbeddingProviderError
+    from sentinel.core.provider_factory import create_embedding_provider
+
+    sentinel_dir = _find_sentinel_dir()
+    if sentinel_dir is None:
+        return store.search(query, limit=limit, offset=offset)
+
+    config = SentinelConfig.load(sentinel_dir)
+    try:
+        provider = create_embedding_provider(config)
+        query_vec = provider.embed(query)
+        return store.semantic_search(query_vec, limit=limit, offset=offset)
+    except EmbeddingProviderError:
+        return store.search(query, limit=limit, offset=offset)
+
+
 def create_server() -> FastMCP:
     """Create and configure the MCP server with all tools registered."""
     if not HAS_MCP:
@@ -104,22 +128,29 @@ def create_server() -> FastMCP:
             store.close()
 
     @mcp.tool()
-    def sentinel_query(query: str, limit: int = 20, offset: int = 0) -> str:
+    def sentinel_query(
+        query: str, limit: int = 20, offset: int = 0, semantic: bool = False,
+    ) -> str:
         """Free-text search across all project knowledge.
 
-        Uses FTS5 full-text search to find conventions, decisions, pitfalls,
-        and patterns matching the query. Supports pagination via limit/offset.
+        Uses FTS5 full-text search or embedding-based semantic search to find
+        conventions, decisions, pitfalls, and patterns matching the query.
+        Supports pagination via limit/offset.
 
         Args:
             query: Search terms (e.g. "authentication", "error handling", "naming")
             limit: Max results to return (default 20)
             offset: Number of results to skip (default 0)
+            semantic: Use semantic (embedding-based) search instead of FTS5 (default False)
         """
         store = _open_store()
         if store is None:
             return _no_sentinel_msg()
         try:
-            results = store.search(query, limit=limit, offset=offset)
+            if semantic and store.has_embeddings():
+                results = _semantic_query(store, query, limit=limit, offset=offset)
+            else:
+                results = store.search(query, limit=limit, offset=offset)
             return format_query_results(results, query, total=None, offset=offset)
         finally:
             store.close()

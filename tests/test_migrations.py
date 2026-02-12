@@ -408,8 +408,107 @@ def test_v4_to_v5_migration(tmp_path: Path) -> None:
         assert "idx_pattern_content" in indexes
 
 
+def test_v5_to_v6_migration(tmp_path: Path) -> None:
+    """Simulate a v5 DB and verify migration adds embeddings table."""
+    db_path = tmp_path / "sentinel.db"
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE sentinel_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE conventions (
+            id TEXT PRIMARY KEY, category TEXT NOT NULL, pattern TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '', evidence TEXT NOT NULL DEFAULT '[]',
+            confidence REAL NOT NULL DEFAULT 0.5, frequency INTEGER NOT NULL DEFAULT 1,
+            first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'git_history',
+            accepted_count INTEGER NOT NULL DEFAULT 0,
+            rejected_count INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE decisions (
+            id TEXT PRIMARY KEY, summary TEXT NOT NULL, rationale TEXT NOT NULL DEFAULT '',
+            commit_sha TEXT NOT NULL DEFAULT '', author TEXT NOT NULL DEFAULT '',
+            decided_at TEXT NOT NULL, file_paths TEXT NOT NULL DEFAULT '[]',
+            tags TEXT NOT NULL DEFAULT '[]',
+            source TEXT NOT NULL DEFAULT 'git_history'
+        );
+        CREATE TABLE pitfalls (
+            id TEXT PRIMARY KEY, category TEXT NOT NULL DEFAULT 'bug',
+            severity TEXT NOT NULL DEFAULT 'medium', description TEXT NOT NULL,
+            code_pattern TEXT, how_to_prevent TEXT NOT NULL DEFAULT '',
+            evidence TEXT NOT NULL DEFAULT '[]', frequency INTEGER NOT NULL DEFAULT 1,
+            first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'git_history',
+            accepted_count INTEGER NOT NULL DEFAULT 0,
+            rejected_count INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE patterns (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+            ast_pattern TEXT NOT NULL DEFAULT '', file_glob TEXT NOT NULL DEFAULT '',
+            frequency INTEGER NOT NULL DEFAULT 1, examples TEXT NOT NULL DEFAULT '[]'
+        );
+        CREATE TABLE hot_files (
+            file_path TEXT PRIMARY KEY, change_count INTEGER NOT NULL DEFAULT 0,
+            bug_fix_count INTEGER NOT NULL DEFAULT 0, revert_count INTEGER NOT NULL DEFAULT 0,
+            churn_score REAL NOT NULL DEFAULT 0.0
+        );
+        CREATE TABLE co_changes (
+            file_a TEXT NOT NULL, file_b TEXT NOT NULL,
+            change_count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (file_a, file_b)
+        );
+        CREATE TABLE scan_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, scanned_at TEXT NOT NULL,
+            last_sha TEXT NOT NULL DEFAULT '', commits_scanned INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE feedback (
+            id TEXT PRIMARY KEY, knowledge_id TEXT NOT NULL,
+            knowledge_type TEXT NOT NULL, outcome TEXT NOT NULL,
+            context TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_feedback_knowledge_id ON feedback(knowledge_id);
+        CREATE TABLE shared_patterns (
+            id TEXT PRIMARY KEY, knowledge_type TEXT NOT NULL,
+            category TEXT NOT NULL DEFAULT '', description TEXT NOT NULL,
+            severity TEXT, confidence REAL NOT NULL DEFAULT 0.3,
+            source_project TEXT NOT NULL DEFAULT '', imported_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_convention_content ON conventions(category, pattern);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_content ON decisions(summary, commit_sha);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_pitfall_content ON pitfalls(category, description);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_pattern_content ON patterns(name, ast_pattern);
+    """)
+    conn.execute("INSERT INTO sentinel_meta (key, value) VALUES ('schema_version', '5')")
+    conn.commit()
+    conn.close()
+
+    with KnowledgeStore(db_path) as store:
+        assert store.get_meta("schema_version") == str(SCHEMA_VERSION)
+
+        # Check embeddings table exists
+        tables = {
+            row[0] for row in store.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "embeddings" in tables
+
+        # Check index exists
+        indexes = {
+            row[0] for row in store.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ).fetchall()
+        }
+        assert "idx_embeddings_type" in indexes
+
+        # Verify embeddings table works
+        store.store_embedding("test-id", "convention", [0.1, 0.2, 0.3], "test-model")
+        result = store.get_embedding("test-id")
+        assert result is not None
+
+
 def test_full_migration_chain(tmp_path: Path) -> None:
-    """A v1 DB should migrate all the way to v5."""
+    """A v1 DB should migrate all the way to v6."""
     db_path = tmp_path / "sentinel.db"
 
     # Create a bare-bones v1 DB
@@ -495,6 +594,10 @@ def test_full_migration_chain(tmp_path: Path) -> None:
         }
         assert "idx_convention_content" in indexes
         assert "idx_decision_content" in indexes
+
+        # v5->v6: embeddings table
+        assert "embeddings" in tables
+        assert "idx_embeddings_type" in indexes
 
 
 def test_migration_idempotent(tmp_path: Path) -> None:

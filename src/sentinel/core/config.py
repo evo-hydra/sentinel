@@ -56,6 +56,11 @@ class SentinelConfig(BaseModel):
     enrich_model: str = "claude-haiku-4-5-20251001"
     enrich_batch_size: int = 25
 
+    # Embedding settings (semantic search)
+    embed_provider: str = "ollama"
+    embed_model: str = "nomic-embed-text"
+    embed_batch_size: int = 50
+
     @classmethod
     def load(cls, sentinel_dir: Path) -> SentinelConfig:
         """Load config from .sentinel/config.yaml if it exists."""

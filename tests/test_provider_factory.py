@@ -1,4 +1,4 @@
-"""Tests for core/provider_factory.py — create_provider."""
+"""Tests for core/provider_factory.py — create_provider + create_embedding_provider."""
 
 from __future__ import annotations
 
@@ -7,12 +7,17 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from sentinel.core.config import SentinelConfig
+from sentinel.core.embedding_provider import (
+    EmbeddingProviderError,
+    OllamaEmbeddingProvider,
+    OpenAIEmbeddingProvider,
+)
 from sentinel.core.llm_provider import (
     LLMProviderError,
     OllamaProvider,
     OpenAICompatibleProvider,
 )
-from sentinel.core.provider_factory import create_provider
+from sentinel.core.provider_factory import create_embedding_provider, create_provider
 
 
 def test_create_provider_unknown_raises() -> None:
@@ -95,3 +100,32 @@ def test_create_provider_openai_missing_package(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     with patch.dict("sys.modules", {"openai": None}), pytest.raises(LLMProviderError, match="openai package"):
         create_provider(config=SentinelConfig(llm_provider="openai"))
+
+
+# --- Embedding provider factory tests ---
+
+
+def test_create_embedding_provider_ollama(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ollama embedding provider creation (mocked connection check)."""
+    with patch.object(OllamaEmbeddingProvider, "_verify_connection"):
+        config = SentinelConfig(embed_provider="ollama", embed_model="nomic-embed-text")
+        provider = create_embedding_provider(config)
+        assert isinstance(provider, OllamaEmbeddingProvider)
+        assert provider.model_name == "nomic-embed-text"
+
+
+def test_create_embedding_provider_openai(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OpenAI embedding provider creation with mocked SDK."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    with patch.object(OpenAIEmbeddingProvider, "_create_client", return_value=MagicMock()):
+        config = SentinelConfig(embed_provider="openai", embed_model="text-embedding-3-small")
+        provider = create_embedding_provider(config)
+        assert isinstance(provider, OpenAIEmbeddingProvider)
+        assert provider.model_name == "text-embedding-3-small"
+
+
+def test_create_embedding_provider_unknown() -> None:
+    """Unknown embedding provider should raise EmbeddingProviderError."""
+    config = SentinelConfig(embed_provider="nonexistent")
+    with pytest.raises(EmbeddingProviderError, match="Unknown embedding provider"):
+        create_embedding_provider(config)
