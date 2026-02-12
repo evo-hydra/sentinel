@@ -68,13 +68,19 @@ Sentinel exposes 8 tools via MCP (stdio transport, FastMCP). All read tools are 
 | Tool | Parameters | Type |
 |------|-----------|------|
 | `sentinel_project_context` | (none) | |
-| `sentinel_query` | `query: str` | Free-text search terms |
-| `sentinel_conventions` | (none) | |
-| `sentinel_pitfalls` | (none) | |
-| `sentinel_decisions` | (none) | |
+| `sentinel_query` | `query: str`, `limit: int` (opt), `offset: int` (opt) | Free-text search terms |
+| `sentinel_conventions` | `limit: int` (opt), `offset: int` (opt) | Default limit=50 |
+| `sentinel_pitfalls` | `limit: int` (opt), `offset: int` (opt) | Default limit=50 |
+| `sentinel_decisions` | `limit: int` (opt), `offset: int` (opt) | Default limit=30 |
 | `sentinel_hot_files` | (none) | |
-| `sentinel_co_changes` | `file_path: str` | Relative path, e.g. `"src/auth.py"` |
+| `sentinel_co_changes` | `file_path: str`, `limit: int` (opt), `offset: int` (opt) | Relative path, e.g. `"src/auth.py"` |
 | `sentinel_feedback` | `knowledge_id: str`, `outcome: str`, `context: str` (optional) | ID from tool output, `"accepted"` / `"rejected"` / `"modified"` |
+
+**Pagination:** Tools that accept `limit`/`offset` append a footer when more results are available:
+
+```
+*Showing 1–50 of 127. Use offset=50 to see more.*
+```
 
 ### Response Shape
 
@@ -261,7 +267,7 @@ Exported data includes only pattern descriptions, categories, severity, confiden
 
 ## Knowledge Store Schema
 
-All data lives in `.sentinel/sentinel.db` (SQLite with FTS5, schema version 4). Knowledge types:
+All data lives in `.sentinel/sentinel.db` (SQLite with FTS5, schema version 5). Knowledge types:
 
 | Type | Source | What It Captures |
 |------|--------|------------------|
@@ -289,7 +295,7 @@ Schema migrations run automatically when opening a database from an older versio
 | `sentinel hunt --llm` | LLM-powered review (5 providers) |
 | `sentinel hunt --llm-bg` | Background LLM review |
 | `sentinel swarm` | Incremental learning from new commits |
-| `sentinel hive list` | List knowledge entries |
+| `sentinel hive list [--offset N]` | List knowledge entries (paginated) |
 | `sentinel hive add <type> <desc>` | Add manual knowledge |
 | `sentinel hive search <query>` | Full-text search |
 | `sentinel feedback submit <id> <outcome>` | Submit feedback on a knowledge entry |
@@ -326,7 +332,7 @@ cd sentinel
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev,mcp]"
 
-pytest --cov                                        # 267 tests
+pytest --cov                                        # 287 tests
 ruff check src/ tests/                              # Lint
 mypy src/sentinel/ --ignore-missing-imports         # Types
 ```
