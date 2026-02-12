@@ -359,6 +359,148 @@ def test_pitfall_dedup_on_reinsert(knowledge_store: KnowledgeStore) -> None:
     assert pits[0].last_seen == "2024-06-01"  # updated
 
 
+# --- Pagination tests ---
+
+
+def _add_conventions(store: KnowledgeStore, n: int) -> None:
+    """Helper to add n conventions with distinct categories/patterns."""
+    cats = list(ConventionCategory)
+    for i in range(n):
+        store.add_convention(Convention(
+            category=cats[i % len(cats)],
+            pattern=f"pattern_{i}",
+            description=f"desc_{i}",
+            frequency=n - i,  # descending frequency
+        ))
+
+
+def _add_pitfalls(store: KnowledgeStore, n: int) -> None:
+    cats = list(PitfallCategory)
+    for i in range(n):
+        store.add_pitfall(Pitfall(
+            category=cats[i % len(cats)],
+            description=f"pitfall_{i}",
+            frequency=n - i,
+        ))
+
+
+def _add_decisions(store: KnowledgeStore, n: int) -> None:
+    for i in range(n):
+        store.add_decision(Decision(
+            summary=f"decision_{i}",
+            decided_at=f"2024-01-{i + 1:02d}",
+        ))
+
+
+def _add_patterns(store: KnowledgeStore, n: int) -> None:
+    for i in range(n):
+        store.add_pattern(CodePattern(
+            name=f"pattern_{i}",
+            description=f"desc_{i}",
+            frequency=n - i,
+        ))
+
+
+def test_get_conventions_limit_offset(knowledge_store: KnowledgeStore) -> None:
+    _add_conventions(knowledge_store, 10)
+
+    page1 = knowledge_store.get_conventions(limit=3, offset=0)
+    page2 = knowledge_store.get_conventions(limit=3, offset=3)
+    assert len(page1) == 3
+    assert len(page2) == 3
+    assert page1[0].pattern != page2[0].pattern
+    # Verify ordering — first page has highest frequency
+    assert page1[0].frequency > page2[0].frequency
+
+
+def test_get_pitfalls_limit_offset(knowledge_store: KnowledgeStore) -> None:
+    _add_pitfalls(knowledge_store, 10)
+
+    page1 = knowledge_store.get_pitfalls(limit=4, offset=0)
+    page2 = knowledge_store.get_pitfalls(limit=4, offset=4)
+    assert len(page1) == 4
+    assert len(page2) == 4
+    ids1 = {p.id for p in page1}
+    ids2 = {p.id for p in page2}
+    assert ids1.isdisjoint(ids2)
+
+
+def test_get_patterns_limit_offset(knowledge_store: KnowledgeStore) -> None:
+    _add_patterns(knowledge_store, 8)
+
+    page1 = knowledge_store.get_patterns(limit=5, offset=0)
+    page2 = knowledge_store.get_patterns(limit=5, offset=5)
+    assert len(page1) == 5
+    assert len(page2) == 3  # only 3 remaining
+
+
+def test_get_decisions_offset(knowledge_store: KnowledgeStore) -> None:
+    _add_decisions(knowledge_store, 6)
+
+    all_decs = knowledge_store.get_decisions(limit=10)
+    page = knowledge_store.get_decisions(limit=3, offset=3)
+    assert len(page) == 3
+    assert page[0].id == all_decs[3].id
+
+
+def test_get_co_changes_limit(knowledge_store: KnowledgeStore) -> None:
+    for i in range(5):
+        knowledge_store.upsert_co_change(
+            CoChange(file_a="main.py", file_b=f"other_{i}.py", change_count=10 - i)
+        )
+
+    page = knowledge_store.get_co_changes("main.py", min_count=1, limit=3)
+    assert len(page) == 3
+    page2 = knowledge_store.get_co_changes("main.py", min_count=1, limit=3, offset=3)
+    assert len(page2) == 2  # only 2 remaining
+
+
+def test_count_conventions(knowledge_store: KnowledgeStore) -> None:
+    assert knowledge_store.count_conventions() == 0
+    _add_conventions(knowledge_store, 5)
+    assert knowledge_store.count_conventions() == 5
+
+    # Count by category
+    cat = next(iter(ConventionCategory))
+    cat_count = knowledge_store.count_conventions(category=cat)
+    assert cat_count > 0
+    assert cat_count <= 5
+
+
+def test_count_decisions(knowledge_store: KnowledgeStore) -> None:
+    assert knowledge_store.count_decisions() == 0
+    _add_decisions(knowledge_store, 3)
+    assert knowledge_store.count_decisions() == 3
+
+
+def test_count_pitfalls(knowledge_store: KnowledgeStore) -> None:
+    assert knowledge_store.count_pitfalls() == 0
+    _add_pitfalls(knowledge_store, 7)
+    assert knowledge_store.count_pitfalls() == 7
+
+
+def test_count_patterns(knowledge_store: KnowledgeStore) -> None:
+    assert knowledge_store.count_patterns() == 0
+    _add_patterns(knowledge_store, 4)
+    assert knowledge_store.count_patterns() == 4
+
+
+def test_all_conventions_returns_all(knowledge_store: KnowledgeStore) -> None:
+    """all_conventions() should return everything regardless of default limit."""
+    _add_conventions(knowledge_store, 60)
+    assert len(knowledge_store.all_conventions()) == 60
+
+
+def test_all_pitfalls_returns_all(knowledge_store: KnowledgeStore) -> None:
+    _add_pitfalls(knowledge_store, 60)
+    assert len(knowledge_store.all_pitfalls()) == 60
+
+
+def test_all_patterns_returns_all(knowledge_store: KnowledgeStore) -> None:
+    _add_patterns(knowledge_store, 60)
+    assert len(knowledge_store.all_patterns()) == 60
+
+
 def test_pattern_dedup_on_reinsert(knowledge_store: KnowledgeStore) -> None:
     """Inserting same pattern twice should update, not duplicate."""
     knowledge_store.add_pattern(CodePattern(

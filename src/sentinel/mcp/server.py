@@ -104,69 +104,89 @@ def create_server() -> FastMCP:
             store.close()
 
     @mcp.tool()
-    def sentinel_query(query: str) -> str:
+    def sentinel_query(query: str, limit: int = 20, offset: int = 0) -> str:
         """Free-text search across all project knowledge.
 
         Uses FTS5 full-text search to find conventions, decisions, pitfalls,
-        and patterns matching the query.
+        and patterns matching the query. Supports pagination via limit/offset.
 
         Args:
             query: Search terms (e.g. "authentication", "error handling", "naming")
+            limit: Max results to return (default 20)
+            offset: Number of results to skip (default 0)
         """
         store = _open_store()
         if store is None:
             return _no_sentinel_msg()
         try:
-            results = store.search(query, limit=20)
-            return format_query_results(results, query)
+            results = store.search(query, limit=limit, offset=offset)
+            return format_query_results(results, query, total=None, offset=offset)
         finally:
             store.close()
 
     @mcp.tool()
-    def sentinel_conventions() -> str:
+    def sentinel_conventions(limit: int = 50, offset: int = 0) -> str:
         """List project conventions with confidence scores.
 
         Check this before writing code to follow established patterns
         for naming, imports, structure, commit messages, and style.
+        Supports pagination via limit/offset.
+
+        Args:
+            limit: Max conventions to return (default 50)
+            offset: Number of conventions to skip (default 0)
         """
         store = _open_store()
         if store is None:
             return _no_sentinel_msg()
         try:
-            conventions = store.get_conventions()
-            return format_conventions(conventions)
+            conventions = store.get_conventions(limit=limit, offset=offset)
+            total = store.count_conventions()
+            return format_conventions(conventions, total=total, offset=offset)
         finally:
             store.close()
 
     @mcp.tool()
-    def sentinel_pitfalls() -> str:
+    def sentinel_pitfalls(limit: int = 50, offset: int = 0) -> str:
         """List known pitfalls and how to prevent them.
 
         Check this before modifying risky areas. Pitfalls are learned from
         past reverts, bug fixes, and known issues in the codebase.
+        Supports pagination via limit/offset.
+
+        Args:
+            limit: Max pitfalls to return (default 50)
+            offset: Number of pitfalls to skip (default 0)
         """
         store = _open_store()
         if store is None:
             return _no_sentinel_msg()
         try:
-            pitfalls = store.get_pitfalls()
-            return format_pitfalls(pitfalls)
+            pitfalls = store.get_pitfalls(limit=limit, offset=offset)
+            total = store.count_pitfalls()
+            return format_pitfalls(pitfalls, total=total, offset=offset)
         finally:
             store.close()
 
     @mcp.tool()
-    def sentinel_decisions() -> str:
+    def sentinel_decisions(limit: int = 30, offset: int = 0) -> str:
         """List architectural decisions with rationale.
 
         Use this to understand "why" things are done a certain way
         before making changes that might conflict with past decisions.
+        Supports pagination via limit/offset.
+
+        Args:
+            limit: Max decisions to return (default 30)
+            offset: Number of decisions to skip (default 0)
         """
         store = _open_store()
         if store is None:
             return _no_sentinel_msg()
         try:
-            decisions = store.get_decisions(limit=30)
-            return format_decisions(decisions)
+            decisions = store.get_decisions(limit=limit, offset=offset)
+            total = store.count_decisions()
+            return format_decisions(decisions, total=total, offset=offset)
         finally:
             store.close()
 
@@ -234,21 +254,26 @@ def create_server() -> FastMCP:
             store.close()
 
     @mcp.tool()
-    def sentinel_co_changes(file_path: str) -> str:
+    def sentinel_co_changes(file_path: str, limit: int = 50, offset: int = 0) -> str:
         """Find files that usually change together with the given file.
 
         When editing a file, check what else needs updating. Co-changes are
         learned from git history — files that appear in the same commits.
+        Supports pagination via limit/offset.
 
         Args:
             file_path: Relative path to the file (e.g. "src/auth.py")
+            limit: Max co-change pairs to return (default 50)
+            offset: Number of pairs to skip (default 0)
         """
         store = _open_store()
         if store is None:
             return _no_sentinel_msg()
         try:
-            co_changes = store.get_co_changes(file_path, min_count=2)
-            return format_co_changes(file_path, co_changes)
+            co_changes = store.get_co_changes(
+                file_path, min_count=2, limit=limit, offset=offset,
+            )
+            return format_co_changes(file_path, co_changes, total=None, offset=offset)
         finally:
             store.close()
 

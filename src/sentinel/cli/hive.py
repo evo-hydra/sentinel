@@ -40,6 +40,7 @@ def hive_list(
     ktype: str | None = typer.Option(None, "--type", "-t",
                                         help="Filter by type (convention/decision/pitfall/pattern)."),
     limit: int = typer.Option(20, "--limit", "-l", help="Max entries to show."),
+    offset: int = typer.Option(0, "--offset", help="Number of entries to skip."),
     sort: str = typer.Option("frequency", "--sort", help="Sort by: frequency, date."),
     json_output: bool = typer.Option(False, "--json", "-j", help="Output JSON."),
 ) -> None:
@@ -50,7 +51,7 @@ def hive_list(
         entries: list[dict] = []
 
         if ktype is None or ktype == "convention":
-            for c in store.get_conventions()[:limit]:
+            for c in store.get_conventions(limit=limit, offset=offset):
                 entries.append({
                     "type": "convention", "id": c.id, "category": c.category.value,
                     "pattern": c.pattern, "description": c.description,
@@ -58,14 +59,14 @@ def hive_list(
                 })
 
         if ktype is None or ktype == "decision":
-            for d in store.get_decisions(limit=limit):
+            for d in store.get_decisions(limit=limit, offset=offset):
                 entries.append({
                     "type": "decision", "id": d.id, "summary": d.summary,
                     "rationale": d.rationale[:100], "author": d.author, "date": d.decided_at,
                 })
 
         if ktype is None or ktype == "pitfall":
-            for p in store.get_pitfalls()[:limit]:
+            for p in store.get_pitfalls(limit=limit, offset=offset):
                 entries.append({
                     "type": "pitfall", "id": p.id, "category": p.category.value,
                     "severity": p.severity.value, "description": p.description,
@@ -73,7 +74,7 @@ def hive_list(
                 })
 
         if ktype is None or ktype == "pattern":
-            for p in store.get_patterns()[:limit]:
+            for p in store.get_patterns(limit=limit, offset=offset):
                 entries.append({
                     "type": "pattern", "id": p.id, "name": p.name,
                     "description": p.description, "frequency": p.frequency,
@@ -86,7 +87,7 @@ def hive_list(
             theme.muted("No knowledge entries found.")
             return
 
-        for e in entries[:limit]:
+        for e in entries:
             etype = e.get("type", "?")
             if etype == "convention":
                 theme.console.print(

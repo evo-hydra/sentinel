@@ -386,17 +386,33 @@ class KnowledgeStore:
         self._add_convention_no_commit(c)
         self.conn.commit()
 
-    def get_conventions(self, category: ConventionCategory | None = None) -> list[Convention]:
+    def get_conventions(
+        self,
+        category: ConventionCategory | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[Convention]:
         if category:
             rows = self.conn.execute(
-                "SELECT * FROM conventions WHERE category = ? ORDER BY frequency DESC",
-                (category.value,),
+                "SELECT * FROM conventions WHERE category = ? ORDER BY frequency DESC LIMIT ? OFFSET ?",
+                (category.value, limit, offset),
             ).fetchall()
         else:
             rows = self.conn.execute(
-                "SELECT * FROM conventions ORDER BY frequency DESC"
+                "SELECT * FROM conventions ORDER BY frequency DESC LIMIT ? OFFSET ?",
+                (limit, offset),
             ).fetchall()
         return [self._row_to_convention(r) for r in rows]
+
+    def count_conventions(self, category: ConventionCategory | None = None) -> int:
+        if category:
+            row = self.conn.execute(
+                "SELECT COUNT(*) as cnt FROM conventions WHERE category = ?",
+                (category.value,),
+            ).fetchone()
+        else:
+            row = self.conn.execute("SELECT COUNT(*) as cnt FROM conventions").fetchone()
+        return row["cnt"] if row else 0
 
     def _row_to_convention(self, row: sqlite3.Row) -> Convention:
         return Convention(
@@ -418,11 +434,16 @@ class KnowledgeStore:
         self._add_decision_no_commit(d)
         self.conn.commit()
 
-    def get_decisions(self, limit: int = 50) -> list[Decision]:
+    def get_decisions(self, limit: int = 50, offset: int = 0) -> list[Decision]:
         rows = self.conn.execute(
-            "SELECT * FROM decisions ORDER BY decided_at DESC LIMIT ?", (limit,)
+            "SELECT * FROM decisions ORDER BY decided_at DESC LIMIT ? OFFSET ?",
+            (limit, offset),
         ).fetchall()
         return [self._row_to_decision(r) for r in rows]
+
+    def count_decisions(self) -> int:
+        row = self.conn.execute("SELECT COUNT(*) as cnt FROM decisions").fetchone()
+        return row["cnt"] if row else 0
 
     def _row_to_decision(self, row: sqlite3.Row) -> Decision:
         return Decision(
@@ -443,17 +464,33 @@ class KnowledgeStore:
         self._add_pitfall_no_commit(p)
         self.conn.commit()
 
-    def get_pitfalls(self, category: PitfallCategory | None = None) -> list[Pitfall]:
+    def get_pitfalls(
+        self,
+        category: PitfallCategory | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[Pitfall]:
         if category:
             rows = self.conn.execute(
-                "SELECT * FROM pitfalls WHERE category = ? ORDER BY frequency DESC",
-                (category.value,),
+                "SELECT * FROM pitfalls WHERE category = ? ORDER BY frequency DESC LIMIT ? OFFSET ?",
+                (category.value, limit, offset),
             ).fetchall()
         else:
             rows = self.conn.execute(
-                "SELECT * FROM pitfalls ORDER BY frequency DESC"
+                "SELECT * FROM pitfalls ORDER BY frequency DESC LIMIT ? OFFSET ?",
+                (limit, offset),
             ).fetchall()
         return [self._row_to_pitfall(r) for r in rows]
+
+    def count_pitfalls(self, category: PitfallCategory | None = None) -> int:
+        if category:
+            row = self.conn.execute(
+                "SELECT COUNT(*) as cnt FROM pitfalls WHERE category = ?",
+                (category.value,),
+            ).fetchone()
+        else:
+            row = self.conn.execute("SELECT COUNT(*) as cnt FROM pitfalls").fetchone()
+        return row["cnt"] if row else 0
 
     def _row_to_pitfall(self, row: sqlite3.Row) -> Pitfall:
         return Pitfall(
@@ -476,11 +513,16 @@ class KnowledgeStore:
         self._add_pattern_no_commit(p)
         self.conn.commit()
 
-    def get_patterns(self) -> list[CodePattern]:
+    def get_patterns(self, limit: int = 50, offset: int = 0) -> list[CodePattern]:
         rows = self.conn.execute(
-            "SELECT * FROM patterns ORDER BY frequency DESC"
+            "SELECT * FROM patterns ORDER BY frequency DESC LIMIT ? OFFSET ?",
+            (limit, offset),
         ).fetchall()
         return [self._row_to_pattern(r) for r in rows]
+
+    def count_patterns(self) -> int:
+        row = self.conn.execute("SELECT COUNT(*) as cnt FROM patterns").fetchone()
+        return row["cnt"] if row else 0
 
     def _row_to_pattern(self, row: sqlite3.Row) -> CodePattern:
         return CodePattern(
@@ -510,9 +552,10 @@ class KnowledgeStore:
         )
         self.conn.commit()
 
-    def get_hot_files(self, limit: int = 20) -> list[HotFile]:
+    def get_hot_files(self, limit: int = 20, offset: int = 0) -> list[HotFile]:
         rows = self.conn.execute(
-            "SELECT * FROM hot_files ORDER BY churn_score DESC LIMIT ?", (limit,)
+            "SELECT * FROM hot_files ORDER BY churn_score DESC LIMIT ? OFFSET ?",
+            (limit, offset),
         ).fetchall()
         return [HotFile(
             file_path=r["file_path"],
@@ -549,12 +592,14 @@ class KnowledgeStore:
         )
         self.conn.commit()
 
-    def get_co_changes(self, file_path: str, min_count: int = 3) -> list[CoChange]:
+    def get_co_changes(
+        self, file_path: str, min_count: int = 3, limit: int = 50, offset: int = 0,
+    ) -> list[CoChange]:
         rows = self.conn.execute(
             """SELECT * FROM co_changes
             WHERE (file_a = ? OR file_b = ?) AND change_count >= ?
-            ORDER BY change_count DESC""",
-            (file_path, file_path, min_count),
+            ORDER BY change_count DESC LIMIT ? OFFSET ?""",
+            (file_path, file_path, min_count, limit, offset),
         ).fetchall()
         return [CoChange(
             file_a=r["file_a"], file_b=r["file_b"], change_count=r["change_count"]
@@ -605,11 +650,13 @@ class KnowledgeStore:
         if knowledge_type == "convention":
             self.update_confidence_from_feedback(knowledge_id)
 
-    def get_feedback(self, knowledge_id: str) -> list[Feedback]:
+    def get_feedback(
+        self, knowledge_id: str, limit: int = 50, offset: int = 0,
+    ) -> list[Feedback]:
         """Get all feedback for a knowledge entry."""
         rows = self.conn.execute(
-            "SELECT * FROM feedback WHERE knowledge_id = ? ORDER BY created_at DESC",
-            (knowledge_id,),
+            "SELECT * FROM feedback WHERE knowledge_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (knowledge_id, limit, offset),
         ).fetchall()
         return [Feedback(
             id=r["id"], knowledge_id=r["knowledge_id"], knowledge_type=r["knowledge_type"],
@@ -678,24 +725,29 @@ class KnowledgeStore:
         except sqlite3.OperationalError:
             logger.debug("FTS5 index failed for %s", knowledge_id)
 
-    def search(self, query: str, ktype: KnowledgeType | None = None,
-               limit: int = 20) -> list[dict[str, str]]:
+    def search(
+        self,
+        query: str,
+        ktype: KnowledgeType | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[dict[str, str]]:
         try:
             if ktype:
                 rows = self.conn.execute(
                     """SELECT knowledge_id, knowledge_type, snippet(knowledge_fts, 2, '>>>', '<<<', '...', 32) as snippet
                     FROM knowledge_fts
                     WHERE knowledge_fts MATCH ? AND knowledge_type = ?
-                    LIMIT ?""",
-                    (query, ktype.value, limit),
+                    LIMIT ? OFFSET ?""",
+                    (query, ktype.value, limit, offset),
                 ).fetchall()
             else:
                 rows = self.conn.execute(
                     """SELECT knowledge_id, knowledge_type, snippet(knowledge_fts, 2, '>>>', '<<<', '...', 32) as snippet
                     FROM knowledge_fts
                     WHERE knowledge_fts MATCH ?
-                    LIMIT ?""",
-                    (query, limit),
+                    LIMIT ? OFFSET ?""",
+                    (query, limit, offset),
                 ).fetchall()
             return [{"id": r["knowledge_id"], "type": r["knowledge_type"], "snippet": r["snippet"]}
                     for r in rows]
@@ -842,10 +894,10 @@ class KnowledgeStore:
     # --- Bulk read for verifier ---
 
     def all_conventions(self) -> list[Convention]:
-        return self.get_conventions()
+        return self.get_conventions(limit=10000)
 
     def all_pitfalls(self) -> list[Pitfall]:
-        return self.get_pitfalls()
+        return self.get_pitfalls(limit=10000)
 
     def all_patterns(self) -> list[CodePattern]:
-        return self.get_patterns()
+        return self.get_patterns(limit=10000)

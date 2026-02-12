@@ -109,7 +109,7 @@ class PRAnalyzer:
 
     def _find_relevant_pitfalls(self, changed_files: list[str]) -> list[Pitfall]:
         """Find pitfalls related to changed files."""
-        all_pitfalls = self.store.get_pitfalls()
+        all_pitfalls = self.store.get_pitfalls(limit=100)
         relevant: list[Pitfall] = []
         seen_ids: set[str] = set()
         for p in all_pitfalls:

@@ -107,7 +107,7 @@ def format_project_context(store: KnowledgeStore) -> str:
     )
 
     # Conventions (top 10 by frequency)
-    conventions = store.get_conventions()[:10]
+    conventions = store.get_conventions(limit=10)
     if conventions:
         parts.append("## Conventions\n")
         for c in conventions:
@@ -119,7 +119,7 @@ def format_project_context(store: KnowledgeStore) -> str:
         parts.append("")
 
     # Pitfalls (top 10 by frequency)
-    pitfalls = store.get_pitfalls()[:10]
+    pitfalls = store.get_pitfalls(limit=10)
     if pitfalls:
         parts.append("## Pitfalls\n")
         for p in pitfalls:
@@ -167,7 +167,21 @@ def format_project_context(store: KnowledgeStore) -> str:
     return "\n".join(parts)
 
 
-def format_query_results(results: list[dict[str, str]], query: str) -> str:
+def _pagination_footer(count: int, total: int | None, offset: int) -> str | None:
+    """Return a pagination footer if there are more results, or None."""
+    if total is not None and offset + count < total:
+        start = offset + 1
+        end = offset + count
+        return f"\n*Showing {start}\u2013{end} of {total}. Use offset={end} to see more.*"
+    return None
+
+
+def format_query_results(
+    results: list[dict[str, str]],
+    query: str,
+    total: int | None = None,
+    offset: int = 0,
+) -> str:
     """Format FTS5 search results."""
     if not results:
         return f"No results found for query: `{query}`"
@@ -176,10 +190,18 @@ def format_query_results(results: list[dict[str, str]], query: str) -> str:
     for r in results:
         parts.append(f"- **[{r['type']}]** {r['snippet']}")
 
+    footer = _pagination_footer(len(results), total, offset)
+    if footer:
+        parts.append(footer)
+
     return "\n".join(parts)
 
 
-def format_conventions(conventions: list[Convention]) -> str:
+def format_conventions(
+    conventions: list[Convention],
+    total: int | None = None,
+    offset: int = 0,
+) -> str:
     """Format conventions list with confidence and frequency."""
     if not conventions:
         return "No conventions found."
@@ -193,10 +215,18 @@ def format_conventions(conventions: list[Convention]) -> str:
             f"Source: {c.source.value}"
         )
 
+    footer = _pagination_footer(len(conventions), total, offset)
+    if footer:
+        parts.append(footer)
+
     return "\n".join(parts)
 
 
-def format_pitfalls(pitfalls: list[Pitfall]) -> str:
+def format_pitfalls(
+    pitfalls: list[Pitfall],
+    total: int | None = None,
+    offset: int = 0,
+) -> str:
     """Format pitfalls with severity highlighting."""
     if not pitfalls:
         return "No pitfalls found."
@@ -218,10 +248,18 @@ def format_pitfalls(pitfalls: list[Pitfall]) -> str:
         if p.code_pattern:
             parts.append(f"  *Pattern:* `{p.code_pattern}`")
 
+    footer = _pagination_footer(len(pitfalls), total, offset)
+    if footer:
+        parts.append(footer)
+
     return "\n".join(parts)
 
 
-def format_decisions(decisions: list[Decision]) -> str:
+def format_decisions(
+    decisions: list[Decision],
+    total: int | None = None,
+    offset: int = 0,
+) -> str:
     """Format architectural decisions with rationale."""
     if not decisions:
         return "No decisions found."
@@ -243,6 +281,10 @@ def format_decisions(decisions: list[Decision]) -> str:
             parts.append(f"*{' | '.join(meta)}*\n")
         if d.file_paths:
             parts.append(f"Files: {', '.join(f'`{f}`' for f in d.file_paths[:5])}\n")
+
+    footer = _pagination_footer(len(decisions), total, offset)
+    if footer:
+        parts.append(footer)
 
     return "\n".join(parts)
 
@@ -336,7 +378,12 @@ def _hot_file_table(
     return "\n".join(lines)
 
 
-def format_co_changes(file_path: str, co_changes: list[CoChange]) -> str:
+def format_co_changes(
+    file_path: str,
+    co_changes: list[CoChange],
+    total: int | None = None,
+    offset: int = 0,
+) -> str:
     """Format co-change pairs for a given file."""
     if not co_changes:
         return f"No co-change data for `{file_path}`."
@@ -345,6 +392,10 @@ def format_co_changes(file_path: str, co_changes: list[CoChange]) -> str:
     for cc in co_changes:
         other = cc.file_b if cc.file_a == file_path else cc.file_a
         parts.append(f"- `{other}` ({cc.change_count} co-changes)")
+
+    footer = _pagination_footer(len(co_changes), total, offset)
+    if footer:
+        parts.append(footer)
 
     parts.append("")
     parts.append(
