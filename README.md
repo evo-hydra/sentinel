@@ -16,6 +16,7 @@ It provides:
 - **Hot files** — fragility metrics based on churn, bug density, and revert frequency
 - **Co-changes** — files that historically change together (coupling detection)
 - **Patterns** — recurring AST structures in the codebase
+- **Semantic search** — embedding-based similarity search with hybrid FTS5 fallback
 - **Feedback loop** — track accepted/rejected suggestions, self-improving confidence scores
 - **PR review** — analyze pull requests against project knowledge with risk assessment
 - **Cross-project knowledge** — anonymized pattern sharing between projects
@@ -33,6 +34,7 @@ A human provisions memory for the agent:
 pip install code-sentinel[mcp]    # Core + MCP server
 cd your-project
 sentinel init                      # Learn from git history
+sentinel init --embed              # Learn + generate embeddings for semantic search
 sentinel mcp-setup                 # Write .mcp.json for Claude Code
 ```
 
@@ -55,7 +57,7 @@ Sentinel exposes 8 tools via MCP (stdio transport, FastMCP). All read tools are 
 | Tool | Purpose | When to Call |
 |------|---------|-------------|
 | `sentinel_project_context` | Full intelligence summary | Session start |
-| `sentinel_query` | FTS5 free-text search | Searching specific topics |
+| `sentinel_query` | Free-text or semantic search | Searching specific topics |
 | `sentinel_conventions` | Conventions with confidence | Before writing code |
 | `sentinel_pitfalls` | Pitfalls with severity | Before modifying risky areas |
 | `sentinel_decisions` | Architectural decisions | Understanding "why" |
@@ -68,7 +70,7 @@ Sentinel exposes 8 tools via MCP (stdio transport, FastMCP). All read tools are 
 | Tool | Parameters | Type |
 |------|-----------|------|
 | `sentinel_project_context` | (none) | |
-| `sentinel_query` | `query: str`, `limit: int` (opt), `offset: int` (opt) | Free-text search terms |
+| `sentinel_query` | `query: str`, `limit: int` (opt), `offset: int` (opt), `semantic: bool` (opt) | Free-text or natural language search |
 | `sentinel_conventions` | `limit: int` (opt), `offset: int` (opt) | Default limit=50 |
 | `sentinel_pitfalls` | `limit: int` (opt), `offset: int` (opt) | Default limit=50 |
 | `sentinel_decisions` | `limit: int` (opt), `offset: int` (opt) | Default limit=30 |
@@ -107,6 +109,15 @@ Knowledge base: N conventions, N decisions, N pitfalls, N patterns, N tracked fi
 | File | Risk | Fragility | Likely Pair |
 |------|------|-----------|-------------|
 | `src/auth.py` | 74 | **67% FRAGILE** | `tests/test_auth.py` (8) |
+```
+
+**`sentinel_query`** with `semantic=True` includes similarity scores:
+
+```markdown
+## Search Results for `how do we handle errors`
+
+- **[convention]** Use structured logging for all error paths (92% match)
+- **[pitfall]** Swallowed exceptions in middleware (78% match)
 ```
 
 **`sentinel_conventions`**, **`sentinel_pitfalls`**, and **`sentinel_decisions`** now include truncated knowledge IDs (e.g. `(id: abc123de)`) so agents can reference specific entries when submitting feedback.
@@ -252,6 +263,78 @@ Exported data includes only pattern descriptions, categories, severity, confiden
 
 ---
 
+## Semantic Search
+
+Sentinel's default FTS5 search is keyword-based — searching "authentication" won't find entries about "login flow". Embedding-based semantic search closes this gap.
+
+### Setup
+
+Generate embeddings for all knowledge entries:
+
+```bash
+sentinel embed                              # Default: Ollama + nomic-embed-text
+sentinel embed --provider openai            # Use OpenAI text-embedding-3-small
+sentinel embed --model custom-model         # Custom model
+sentinel embed --type convention            # Only embed conventions
+sentinel embed --force                      # Re-embed everything
+```
+
+Or generate embeddings during init:
+
+```bash
+sentinel init --embed                       # Learn + embed in one step
+sentinel init --enrich --embed              # Learn + enrich + embed
+```
+
+### Usage
+
+**CLI** — `hive search` auto-detects whether to use semantic or FTS5 search. If embeddings exist and the query doesn't use FTS5 syntax (AND, OR, NOT, `"`, `*`), semantic search is used automatically:
+
+```bash
+sentinel hive search "how do we handle auth"    # Semantic (auto-detected)
+sentinel hive search "auth AND login"           # FTS5 (detected by syntax)
+sentinel hive search "auth" --semantic          # Force semantic
+```
+
+Semantic results include similarity scores:
+
+```
+  convention   abc123de… [92%] authentication — Auth module conventions
+  pitfall      def456gh… [78%] SQL injection vulnerability
+```
+
+**MCP** — pass `semantic=True` to `sentinel_query`:
+
+```
+sentinel_query(query="how do we handle errors", semantic=True)
+```
+
+When `semantic=True` but no embeddings exist, or the embedding provider is unavailable, Sentinel falls back to FTS5 silently.
+
+### Embedding Providers
+
+| Provider | Model (default) | Requires |
+|----------|-----------------|----------|
+| `ollama` | `nomic-embed-text` (768d) | Local Ollama instance |
+| `openai` | `text-embedding-3-small` (1536d) | `OPENAI_API_KEY` |
+
+Configure in `.sentinel/config.yaml`:
+
+```yaml
+embed_provider: ollama
+embed_model: nomic-embed-text
+embed_batch_size: 50
+```
+
+### How It Works
+
+- Embeddings are stored as packed float32 BLOBs in SQLite (schema v6, `embeddings` table)
+- Search uses pure Python cosine similarity — O(n) scan, trivially fast at Sentinel's scale
+- `semantic_search()` is a separate method from `search()` — callers choose which to use
+- No new required dependencies: Ollama uses stdlib `urllib`, OpenAI reuses the existing `[llm]` extra
+
+---
+
 ## Performance Characteristics
 
 | Operation | Cost | Notes |
@@ -259,15 +342,17 @@ Exported data includes only pattern descriptions, categories, severity, confiden
 | `sentinel init` | O(commits) | One-time. ~1s per 100 commits. |
 | `sentinel init --deep` | O(commits * files) | Deeper analysis. Slower but richer. |
 | `sentinel init --enrich` | O(commits / batch) | LLM enrichment. ~30s per 25 commits. |
+| `sentinel embed` | O(entries / batch) | Embedding generation. ~5s per 50 entries (Ollama). |
 | `sentinel swarm` | O(new commits) | Incremental. Runs in <1s for typical workflows. |
 | MCP tool call | O(1) | SQLite reads. Sub-100ms. |
+| Semantic search | O(embeddings) | Pure Python cosine sim. Sub-100ms for typical DBs. |
 | DB size | ~1KB per 10 commits | `.sentinel/sentinel.db` stays small. |
 
 ---
 
 ## Knowledge Store Schema
 
-All data lives in `.sentinel/sentinel.db` (SQLite with FTS5, schema version 5). Knowledge types:
+All data lives in `.sentinel/sentinel.db` (SQLite with FTS5, schema version 6). Knowledge types:
 
 | Type | Source | What It Captures |
 |------|--------|------------------|
@@ -279,6 +364,7 @@ All data lives in `.sentinel/sentinel.db` (SQLite with FTS5, schema version 5). 
 | Co-Changes | Files in same commits | Coupling that isn't in the imports |
 | Feedback | User/agent responses | Which suggestions are useful |
 | Shared Patterns | Cross-project imports | Patterns from other codebases |
+| Embeddings | Vector representations | Semantic search over knowledge |
 
 Schema migrations run automatically when opening a database from an older version. No manual intervention required.
 
@@ -291,13 +377,16 @@ Schema migrations run automatically when opening a database from an older versio
 | `sentinel init [path]` | Initialize, learn from git history |
 | `sentinel init --deep` | Deep analysis (file-level metrics) |
 | `sentinel init --enrich` | LLM-powered semantic enrichment |
+| `sentinel init --embed` | Generate embeddings for semantic search |
+| `sentinel embed` | Generate/update embeddings for semantic search |
 | `sentinel hunt <paths>` | Scan files against knowledge |
 | `sentinel hunt --llm` | LLM-powered review (5 providers) |
 | `sentinel hunt --llm-bg` | Background LLM review |
 | `sentinel swarm` | Incremental learning from new commits |
 | `sentinel hive list [--offset N]` | List knowledge entries (paginated) |
 | `sentinel hive add <type> <desc>` | Add manual knowledge |
-| `sentinel hive search <query>` | Full-text search |
+| `sentinel hive search <query>` | Full-text search (auto-detects semantic) |
+| `sentinel hive search <q> --semantic` | Force semantic search |
 | `sentinel feedback submit <id> <outcome>` | Submit feedback on a knowledge entry |
 | `sentinel feedback stats` | View aggregate feedback statistics |
 | `sentinel pr-review` | Analyze PR against project knowledge |
@@ -322,6 +411,17 @@ sentinel hunt src/ --llm --provider <name>
 
 Install with: `pip install code-sentinel[llm]`
 
+### Embedding Providers
+
+```bash
+sentinel embed --provider <name>
+```
+
+| Provider | Default Model | Requires |
+|----------|--------------|----------|
+| `ollama` | `nomic-embed-text` | Local Ollama instance |
+| `openai` | `text-embedding-3-small` | `OPENAI_API_KEY` |
+
 ---
 
 ## Development
@@ -332,7 +432,7 @@ cd sentinel
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev,mcp]"
 
-pytest --cov                                        # 287 tests
+pytest --cov                                        # 329 tests
 ruff check src/ tests/                              # Lint
 mypy src/sentinel/ --ignore-missing-imports         # Types
 ```
