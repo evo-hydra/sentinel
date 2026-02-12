@@ -212,18 +212,21 @@ def hive_search(
 
     with store:
         kt = KnowledgeType(ktype) if ktype else None
+        has_embs = store.has_embeddings()
 
         # Auto-detect: use semantic if requested or if embeddings exist and query isn't FTS5
         use_semantic = semantic
-        if not use_semantic and store.has_embeddings() and not _is_fts5_query(query):
+        if not use_semantic and has_embs and not _is_fts5_query(query):
             use_semantic = True
 
-        if use_semantic and store.has_embeddings():
+        if use_semantic and has_embs:
             results = _semantic_search(store, query, kt, limit)
         else:
             if use_semantic:
                 theme.muted("No embeddings found. Falling back to FTS5 search.")
             results = store.search(query, ktype=kt, limit=limit)
+
+    used_semantic = use_semantic and has_embs
 
     if json_output:
         emit(results, json_mode=True)
@@ -239,7 +242,7 @@ def hive_search(
                 f"  [sentinel.accent]{r['type']:12}[/] {r['id'][:8]}…{sim_str} "
                 f"{r['snippet']}"
             )
-        search_mode = "semantic" if use_semantic and store.has_embeddings() else "FTS5"
+        search_mode = "semantic" if used_semantic else "FTS5"
         theme.muted(f"\n  {len(results)} results ({search_mode} search).")
 
 
