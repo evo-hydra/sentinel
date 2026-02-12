@@ -16,6 +16,9 @@ It provides:
 - **Hot files** — fragility metrics based on churn, bug density, and revert frequency
 - **Co-changes** — files that historically change together (coupling detection)
 - **Patterns** — recurring AST structures in the codebase
+- **Feedback loop** — track accepted/rejected suggestions, self-improving confidence scores
+- **PR review** — analyze pull requests against project knowledge with risk assessment
+- **Cross-project knowledge** — anonymized pattern sharing between projects
 
 Sentinel does not modify code. It does not execute commands. It does not act autonomously.
 It is a **read-only intelligence surface** over your repository.
@@ -45,7 +48,7 @@ claude mcp add sentinel -- sentinel-mcp
 
 ## MCP Tool Contract
 
-Sentinel exposes 7 tools via MCP (stdio transport, FastMCP). All tools are **read-only** with **no side effects**.
+Sentinel exposes 8 tools via MCP (stdio transport, FastMCP). All read tools are **read-only** with **no side effects**. The feedback tool is the only write operation.
 
 ### Tools
 
@@ -58,6 +61,7 @@ Sentinel exposes 7 tools via MCP (stdio transport, FastMCP). All tools are **rea
 | `sentinel_decisions` | Architectural decisions | Understanding "why" |
 | `sentinel_hot_files` | Risk-ranked file table | Prioritizing review attention |
 | `sentinel_co_changes` | Co-change pairs for a file | Checking what else to update |
+| `sentinel_feedback` | Submit feedback on knowledge | After acting on a suggestion |
 
 ### Parameters
 
@@ -70,6 +74,7 @@ Sentinel exposes 7 tools via MCP (stdio transport, FastMCP). All tools are **rea
 | `sentinel_decisions` | (none) | |
 | `sentinel_hot_files` | (none) | |
 | `sentinel_co_changes` | `file_path: str` | Relative path, e.g. `"src/auth.py"` |
+| `sentinel_feedback` | `knowledge_id: str`, `outcome: str`, `context: str` (optional) | ID from tool output, `"accepted"` / `"rejected"` / `"modified"` |
 
 ### Response Shape
 
@@ -97,6 +102,8 @@ Knowledge base: N conventions, N decisions, N pitfalls, N patterns, N tracked fi
 |------|------|-----------|-------------|
 | `src/auth.py` | 74 | **67% FRAGILE** | `tests/test_auth.py` (8) |
 ```
+
+**`sentinel_conventions`**, **`sentinel_pitfalls`**, and **`sentinel_decisions`** now include truncated knowledge IDs (e.g. `(id: abc123de)`) so agents can reference specific entries when submitting feedback.
 
 **`sentinel_hot_files`** returns tiered tables:
 
@@ -152,6 +159,12 @@ Knowledge base: N conventions, N decisions, N pitfalls, N patterns, N tracked fi
 *When editing the target file, check if these files also need updates.*
 ```
 
+**`sentinel_feedback`** returns:
+
+```
+Feedback recorded: accepted on abc123de... (3 total feedback entries for this item)
+```
+
 **Error responses** (no `.sentinel/` found):
 
 ```
@@ -160,7 +173,7 @@ No `.sentinel/` directory found. Run `sentinel init` in your project root to ini
 
 ### Guarantees
 
-- **Read-only.** No tool modifies files, executes code, or writes to the repository.
+- **Read-only** (except feedback). No tool modifies files, executes code, or writes to the repository.
 - **Deterministic.** Same knowledge store produces same output. No randomness.
 - **Fail-safe.** Missing `.sentinel/` returns a clear error string, never throws.
 - **No network.** MCP server reads local SQLite only. Zero external calls.
@@ -174,12 +187,72 @@ However, **do not batch Sentinel calls alongside tools that may fail** (e.g., `B
 
 ---
 
+## Feedback Loop
+
+Sentinel learns from your feedback. When a convention, pitfall, or decision is surfaced, you can tell Sentinel whether it was useful:
+
+```bash
+sentinel feedback submit <knowledge_id> accepted
+sentinel feedback submit <knowledge_id> rejected --context "Not relevant to this project"
+sentinel feedback stats
+```
+
+Or via MCP (agents can do this automatically):
+
+```
+sentinel_feedback(knowledge_id="abc123de", outcome="accepted")
+```
+
+**How it works:**
+- `accepted` / `rejected` feedback increments counters on conventions and pitfalls
+- Convention confidence is recalculated: `new = 0.6 * (accepted / total) + 0.4 * current`
+- Frequently rejected entries naturally drop in confidence and visibility
+- Knowledge IDs are shown in all MCP tool output for easy reference
+
+---
+
+## PR Review
+
+Analyze pull requests against project knowledge before merging:
+
+```bash
+sentinel pr-review                          # Review current branch vs main
+sentinel pr-review --base develop           # Custom base branch
+sentinel pr-review --json                   # Structured output
+sentinel pr-review --post                   # Post as GitHub PR comment (requires gh CLI)
+```
+
+PR review checks:
+- **Convention violations** and **pitfall matches** in changed files
+- **Hot files touched** with churn/fragility stats
+- **Missing co-changes** — files that usually change together but weren't in the PR
+- **Relevant context** — decisions and pitfalls related to the changed area
+
+---
+
+## Cross-Project Knowledge
+
+Share anonymized patterns between projects:
+
+```bash
+# Export (strips commit SHAs, authors, file paths)
+sentinel share export --output patterns.json
+
+# Import into another project (deduplicates, caps confidence at 0.3)
+sentinel share import patterns.json
+```
+
+Exported data includes only pattern descriptions, categories, severity, confidence, and frequency. No PII. The source project is identified only by a SHA256 hash for deduplication.
+
+---
+
 ## Performance Characteristics
 
 | Operation | Cost | Notes |
 |-----------|------|-------|
 | `sentinel init` | O(commits) | One-time. ~1s per 100 commits. |
 | `sentinel init --deep` | O(commits * files) | Deeper analysis. Slower but richer. |
+| `sentinel init --enrich` | O(commits / batch) | LLM enrichment. ~30s per 25 commits. |
 | `sentinel swarm` | O(new commits) | Incremental. Runs in <1s for typical workflows. |
 | MCP tool call | O(1) | SQLite reads. Sub-100ms. |
 | DB size | ~1KB per 10 commits | `.sentinel/sentinel.db` stays small. |
@@ -188,7 +261,7 @@ However, **do not batch Sentinel calls alongside tools that may fail** (e.g., `B
 
 ## Knowledge Store Schema
 
-All data lives in `.sentinel/sentinel.db` (SQLite with FTS5). Knowledge types:
+All data lives in `.sentinel/sentinel.db` (SQLite with FTS5, schema version 4). Knowledge types:
 
 | Type | Source | What It Captures |
 |------|--------|------------------|
@@ -198,6 +271,10 @@ All data lives in `.sentinel/sentinel.db` (SQLite with FTS5). Knowledge types:
 | Patterns | Recurring AST structures | Common code idioms |
 | Hot Files | Change frequency, bug density | Files needing extra scrutiny |
 | Co-Changes | Files in same commits | Coupling that isn't in the imports |
+| Feedback | User/agent responses | Which suggestions are useful |
+| Shared Patterns | Cross-project imports | Patterns from other codebases |
+
+Schema migrations run automatically when opening a database from an older version. No manual intervention required.
 
 ---
 
@@ -207,6 +284,7 @@ All data lives in `.sentinel/sentinel.db` (SQLite with FTS5). Knowledge types:
 |---------|---------|
 | `sentinel init [path]` | Initialize, learn from git history |
 | `sentinel init --deep` | Deep analysis (file-level metrics) |
+| `sentinel init --enrich` | LLM-powered semantic enrichment |
 | `sentinel hunt <paths>` | Scan files against knowledge |
 | `sentinel hunt --llm` | LLM-powered review (5 providers) |
 | `sentinel hunt --llm-bg` | Background LLM review |
@@ -214,6 +292,11 @@ All data lives in `.sentinel/sentinel.db` (SQLite with FTS5). Knowledge types:
 | `sentinel hive list` | List knowledge entries |
 | `sentinel hive add <type> <desc>` | Add manual knowledge |
 | `sentinel hive search <query>` | Full-text search |
+| `sentinel feedback submit <id> <outcome>` | Submit feedback on a knowledge entry |
+| `sentinel feedback stats` | View aggregate feedback statistics |
+| `sentinel pr-review` | Analyze PR against project knowledge |
+| `sentinel share export` | Export anonymized patterns |
+| `sentinel share import <file>` | Import cross-project patterns |
 | `sentinel watch` | Install git hooks (pre-commit + post-commit) |
 | `sentinel mcp-setup` | Write `.mcp.json` for Claude Code |
 
@@ -243,7 +326,7 @@ cd sentinel
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev,mcp]"
 
-pytest --cov                                        # 192 tests
+pytest --cov                                        # 267 tests
 ruff check src/ tests/                              # Lint
 mypy src/sentinel/ --ignore-missing-imports         # Types
 ```
