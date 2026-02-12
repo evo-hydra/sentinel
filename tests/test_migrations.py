@@ -265,8 +265,151 @@ def test_v3_to_v4_migration(tmp_path: Path) -> None:
         assert "shared_patterns" in tables
 
 
+def test_v4_to_v5_migration(tmp_path: Path) -> None:
+    """Simulate a v4 DB with duplicates and verify migration deduplicates and adds indexes."""
+    db_path = tmp_path / "sentinel.db"
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE sentinel_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE conventions (
+            id TEXT PRIMARY KEY, category TEXT NOT NULL, pattern TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '', evidence TEXT NOT NULL DEFAULT '[]',
+            confidence REAL NOT NULL DEFAULT 0.5, frequency INTEGER NOT NULL DEFAULT 1,
+            first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'git_history',
+            accepted_count INTEGER NOT NULL DEFAULT 0,
+            rejected_count INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE decisions (
+            id TEXT PRIMARY KEY, summary TEXT NOT NULL, rationale TEXT NOT NULL DEFAULT '',
+            commit_sha TEXT NOT NULL DEFAULT '', author TEXT NOT NULL DEFAULT '',
+            decided_at TEXT NOT NULL, file_paths TEXT NOT NULL DEFAULT '[]',
+            tags TEXT NOT NULL DEFAULT '[]',
+            source TEXT NOT NULL DEFAULT 'git_history'
+        );
+        CREATE TABLE pitfalls (
+            id TEXT PRIMARY KEY, category TEXT NOT NULL DEFAULT 'bug',
+            severity TEXT NOT NULL DEFAULT 'medium', description TEXT NOT NULL,
+            code_pattern TEXT, how_to_prevent TEXT NOT NULL DEFAULT '',
+            evidence TEXT NOT NULL DEFAULT '[]', frequency INTEGER NOT NULL DEFAULT 1,
+            first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'git_history',
+            accepted_count INTEGER NOT NULL DEFAULT 0,
+            rejected_count INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE patterns (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+            ast_pattern TEXT NOT NULL DEFAULT '', file_glob TEXT NOT NULL DEFAULT '',
+            frequency INTEGER NOT NULL DEFAULT 1, examples TEXT NOT NULL DEFAULT '[]'
+        );
+        CREATE TABLE hot_files (
+            file_path TEXT PRIMARY KEY, change_count INTEGER NOT NULL DEFAULT 0,
+            bug_fix_count INTEGER NOT NULL DEFAULT 0, revert_count INTEGER NOT NULL DEFAULT 0,
+            churn_score REAL NOT NULL DEFAULT 0.0
+        );
+        CREATE TABLE co_changes (
+            file_a TEXT NOT NULL, file_b TEXT NOT NULL,
+            change_count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (file_a, file_b)
+        );
+        CREATE TABLE scan_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, scanned_at TEXT NOT NULL,
+            last_sha TEXT NOT NULL DEFAULT '', commits_scanned INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE feedback (
+            id TEXT PRIMARY KEY, knowledge_id TEXT NOT NULL,
+            knowledge_type TEXT NOT NULL, outcome TEXT NOT NULL,
+            context TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_feedback_knowledge_id ON feedback(knowledge_id);
+        CREATE TABLE shared_patterns (
+            id TEXT PRIMARY KEY, knowledge_type TEXT NOT NULL,
+            category TEXT NOT NULL DEFAULT '', description TEXT NOT NULL,
+            severity TEXT, confidence REAL NOT NULL DEFAULT 0.3,
+            source_project TEXT NOT NULL DEFAULT '', imported_at TEXT NOT NULL
+        );
+    """)
+    conn.execute("INSERT INTO sentinel_meta (key, value) VALUES ('schema_version', '4')")
+
+    # Insert duplicate conventions (same category+pattern, different IDs)
+    conn.execute(
+        "INSERT INTO conventions (id, category, pattern, description, frequency, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("c1", "naming", "snake_case", "short desc", 3, "2024-01-01", "2024-01-01"),
+    )
+    conn.execute(
+        "INSERT INTO conventions (id, category, pattern, description, frequency, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("c2", "naming", "snake_case", "longer description here", 10, "2024-01-02", "2024-01-05"),
+    )
+
+    # Insert duplicate decisions
+    conn.execute(
+        "INSERT INTO decisions (id, summary, commit_sha, decided_at) VALUES (?, ?, ?, ?)",
+        ("d1", "Use FastAPI", "abc123", "2024-01-01"),
+    )
+    conn.execute(
+        "INSERT INTO decisions (id, summary, commit_sha, decided_at) VALUES (?, ?, ?, ?)",
+        ("d2", "Use FastAPI", "abc123", "2024-06-01"),
+    )
+
+    # Insert duplicate pitfalls
+    conn.execute(
+        "INSERT INTO pitfalls (id, category, description, frequency, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?)",
+        ("p1", "bug", "off by one", 2, "2024-01-01", "2024-01-01"),
+    )
+    conn.execute(
+        "INSERT INTO pitfalls (id, category, description, frequency, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?)",
+        ("p2", "bug", "off by one", 7, "2024-01-02", "2024-03-01"),
+    )
+
+    # Insert duplicate patterns
+    conn.execute(
+        "INSERT INTO patterns (id, name, ast_pattern, frequency) VALUES (?, ?, ?, ?)",
+        ("pat1", "singleton", "class.*Meta", 1),
+    )
+    conn.execute(
+        "INSERT INTO patterns (id, name, ast_pattern, frequency) VALUES (?, ?, ?, ?)",
+        ("pat2", "singleton", "class.*Meta", 5),
+    )
+
+    conn.commit()
+    conn.close()
+
+    with KnowledgeStore(db_path) as store:
+        assert store.get_meta("schema_version") == str(SCHEMA_VERSION)
+
+        # Verify deduplication: one row per content key
+        convs = store.get_conventions()
+        assert len(convs) == 1
+        assert convs[0].frequency == 10  # kept higher frequency
+
+        decs = store.get_decisions()
+        assert len(decs) == 1
+        assert decs[0].decided_at == "2024-06-01"  # kept most recent
+
+        pits = store.get_pitfalls()
+        assert len(pits) == 1
+        assert pits[0].frequency == 7  # kept higher frequency
+
+        pats = store.get_patterns()
+        assert len(pats) == 1
+        assert pats[0].frequency == 5  # kept higher frequency
+
+        # Verify indexes exist
+        indexes = {
+            row[0] for row in store.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ).fetchall()
+        }
+        assert "idx_convention_content" in indexes
+        assert "idx_decision_content" in indexes
+        assert "idx_pitfall_content" in indexes
+        assert "idx_pattern_content" in indexes
+
+
 def test_full_migration_chain(tmp_path: Path) -> None:
-    """A v1 DB should migrate all the way to v4."""
+    """A v1 DB should migrate all the way to v5."""
     db_path = tmp_path / "sentinel.db"
 
     # Create a bare-bones v1 DB
@@ -343,6 +486,15 @@ def test_full_migration_chain(tmp_path: Path) -> None:
         cursor = store.conn.execute("PRAGMA table_info(conventions)")
         columns = {row["name"] for row in cursor.fetchall()}
         assert "accepted_count" in columns
+
+        # v4->v5: unique indexes
+        indexes = {
+            row[0] for row in store.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ).fetchall()
+        }
+        assert "idx_convention_content" in indexes
+        assert "idx_decision_content" in indexes
 
 
 def test_migration_idempotent(tmp_path: Path) -> None:

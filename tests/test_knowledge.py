@@ -292,3 +292,89 @@ def test_pitfall_source_column(knowledge_store: KnowledgeStore) -> None:
     sources = {p.description: p.source for p in pitfalls}
     assert sources["Bug found by LLM"] == KnowledgeSource.INFERRED
     assert sources["Bug from revert"] == KnowledgeSource.GIT_HISTORY
+
+
+# --- Deduplication tests ---
+
+
+def test_convention_dedup_on_reinsert(knowledge_store: KnowledgeStore) -> None:
+    """Inserting same convention twice should update, not duplicate."""
+    knowledge_store.add_convention(Convention(
+        category=ConventionCategory.NAMING, pattern="snake_case",
+        description="short", confidence=0.6, frequency=3,
+        first_seen="2024-01-01", last_seen="2024-01-01",
+    ))
+    knowledge_store.add_convention(Convention(
+        category=ConventionCategory.NAMING, pattern="snake_case",
+        description="longer description here", confidence=0.9, frequency=2,
+        first_seen="2024-02-01", last_seen="2024-06-01",
+    ))
+
+    convs = knowledge_store.get_conventions()
+    assert len(convs) == 1
+    assert convs[0].description == "longer description here"  # took longer
+    assert convs[0].confidence == 0.9  # took max
+    assert convs[0].frequency == 3  # took max
+    assert convs[0].first_seen == "2024-01-01"  # preserved original
+    assert convs[0].last_seen == "2024-06-01"  # updated
+
+
+def test_decision_dedup_on_reinsert(knowledge_store: KnowledgeStore) -> None:
+    """Inserting same decision twice should update, not duplicate."""
+    knowledge_store.add_decision(Decision(
+        summary="Use FastAPI", commit_sha="abc123",
+        rationale="short", author="dev1", decided_at="2024-01-01",
+    ))
+    knowledge_store.add_decision(Decision(
+        summary="Use FastAPI", commit_sha="abc123",
+        rationale="much longer rationale here", author="dev2", decided_at="2024-06-01",
+    ))
+
+    decs = knowledge_store.get_decisions()
+    assert len(decs) == 1
+    assert decs[0].rationale == "much longer rationale here"  # took longer
+    assert decs[0].author == "dev2"  # updated
+    assert decs[0].decided_at == "2024-06-01"  # updated
+
+
+def test_pitfall_dedup_on_reinsert(knowledge_store: KnowledgeStore) -> None:
+    """Inserting same pitfall twice should update, not duplicate."""
+    knowledge_store.add_pitfall(Pitfall(
+        category=PitfallCategory.BUG, description="off by one",
+        severity=Severity.LOW, frequency=2, how_to_prevent="short",
+        first_seen="2024-01-01", last_seen="2024-01-01",
+    ))
+    knowledge_store.add_pitfall(Pitfall(
+        category=PitfallCategory.BUG, description="off by one",
+        severity=Severity.HIGH, frequency=1, how_to_prevent="use range checks always",
+        first_seen="2024-02-01", last_seen="2024-06-01",
+    ))
+
+    pits = knowledge_store.get_pitfalls()
+    assert len(pits) == 1
+    assert pits[0].severity == Severity.HIGH  # took higher
+    assert pits[0].frequency == 2  # took max
+    assert pits[0].how_to_prevent == "use range checks always"  # took longer
+    assert pits[0].first_seen == "2024-01-01"  # preserved original
+    assert pits[0].last_seen == "2024-06-01"  # updated
+
+
+def test_pattern_dedup_on_reinsert(knowledge_store: KnowledgeStore) -> None:
+    """Inserting same pattern twice should update, not duplicate."""
+    knowledge_store.add_pattern(CodePattern(
+        name="singleton", ast_pattern="class.*Meta",
+        description="old desc", frequency=3, file_glob="*.py",
+        examples=["old example"],
+    ))
+    knowledge_store.add_pattern(CodePattern(
+        name="singleton", ast_pattern="class.*Meta",
+        description="new desc", frequency=1, file_glob="**/*.py",
+        examples=["new example"],
+    ))
+
+    pats = knowledge_store.get_patterns()
+    assert len(pats) == 1
+    assert pats[0].description == "new desc"  # updated
+    assert pats[0].frequency == 3  # took max
+    assert pats[0].file_glob == "**/*.py"  # updated
+    assert pats[0].examples == ["new example"]  # updated

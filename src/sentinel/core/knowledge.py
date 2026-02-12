@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sentinel_meta (
@@ -134,6 +134,14 @@ CREATE TABLE IF NOT EXISTS shared_patterns (
     source_project  TEXT NOT NULL DEFAULT '',
     imported_at     TEXT NOT NULL
 );
+
+"""
+
+_CONTENT_INDEXES = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_convention_content ON conventions(category, pattern);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_content ON decisions(summary, commit_sha);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pitfall_content ON pitfalls(category, description);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pattern_content ON patterns(name, ast_pattern);
 """
 
 _FTS_SCHEMA = """
@@ -197,10 +205,68 @@ def _migrate_v3_to_v4(conn: sqlite3.Connection) -> None:
     """)
 
 
+def _migrate_v4_to_v5(conn: sqlite3.Connection) -> None:
+    """Add content-based unique indexes and deduplicate existing rows."""
+    # Deduplicate conventions: keep the row with highest frequency per (category, pattern)
+    conn.execute("""
+        DELETE FROM conventions WHERE id NOT IN (
+            SELECT id FROM (
+                SELECT id, ROW_NUMBER() OVER (
+                    PARTITION BY category, pattern ORDER BY frequency DESC, last_seen DESC
+                ) AS rn FROM conventions
+            ) WHERE rn = 1
+        )
+    """)
+    # Deduplicate decisions: keep the row with most recent decided_at per (summary, commit_sha)
+    conn.execute("""
+        DELETE FROM decisions WHERE id NOT IN (
+            SELECT id FROM (
+                SELECT id, ROW_NUMBER() OVER (
+                    PARTITION BY summary, commit_sha ORDER BY decided_at DESC
+                ) AS rn FROM decisions
+            ) WHERE rn = 1
+        )
+    """)
+    # Deduplicate pitfalls: keep the row with highest frequency per (category, description)
+    conn.execute("""
+        DELETE FROM pitfalls WHERE id NOT IN (
+            SELECT id FROM (
+                SELECT id, ROW_NUMBER() OVER (
+                    PARTITION BY category, description ORDER BY frequency DESC, last_seen DESC
+                ) AS rn FROM pitfalls
+            ) WHERE rn = 1
+        )
+    """)
+    # Deduplicate patterns: keep the row with highest frequency per (name, ast_pattern)
+    conn.execute("""
+        DELETE FROM patterns WHERE id NOT IN (
+            SELECT id FROM (
+                SELECT id, ROW_NUMBER() OVER (
+                    PARTITION BY name, ast_pattern ORDER BY frequency DESC
+                ) AS rn FROM patterns
+            ) WHERE rn = 1
+        )
+    """)
+    # Create unique indexes
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_convention_content ON conventions(category, pattern)"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_content ON decisions(summary, commit_sha)"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_pitfall_content ON pitfalls(category, description)"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_pattern_content ON patterns(name, ast_pattern)"
+    )
+
+
 _MIGRATIONS: dict[int, Any] = {
     1: _migrate_v1_to_v2,
     2: _migrate_v2_to_v3,
     3: _migrate_v3_to_v4,
+    4: _migrate_v4_to_v5,
 }
 
 
@@ -228,6 +294,7 @@ class KnowledgeStore:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._init_schema()
         self._run_migrations()
+        self._ensure_content_indexes()
 
     def close(self) -> None:
         if self._conn:
@@ -248,6 +315,10 @@ class KnowledgeStore:
         except sqlite3.OperationalError:
             logger.info("FTS5 not available — search will be disabled")
         self.conn.commit()
+
+    def _ensure_content_indexes(self) -> None:
+        """Create content-based unique indexes (safe after migrations have deduped data)."""
+        self.conn.executescript(_CONTENT_INDEXES)
 
     def _detect_schema_version(self) -> int:
         """Detect schema version for DBs that predate the migration system."""
@@ -312,15 +383,7 @@ class KnowledgeStore:
     # --- Conventions ---
 
     def add_convention(self, c: Convention) -> None:
-        self.conn.execute(
-            """INSERT OR REPLACE INTO conventions
-            (id, category, pattern, description, evidence, confidence, frequency, first_seen, last_seen, source)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (c.id, c.category.value, c.pattern, c.description,
-             json.dumps(c.evidence), c.confidence, c.frequency,
-             c.first_seen, c.last_seen, c.source.value),
-        )
-        self._index_fts(c.id, KnowledgeType.CONVENTION, f"{c.pattern} {c.description}")
+        self._add_convention_no_commit(c)
         self.conn.commit()
 
     def get_conventions(self, category: ConventionCategory | None = None) -> list[Convention]:
@@ -352,14 +415,7 @@ class KnowledgeStore:
     # --- Decisions ---
 
     def add_decision(self, d: Decision) -> None:
-        self.conn.execute(
-            """INSERT OR REPLACE INTO decisions
-            (id, summary, rationale, commit_sha, author, decided_at, file_paths, tags, source)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (d.id, d.summary, d.rationale, d.commit_sha, d.author,
-             d.decided_at, json.dumps(d.file_paths), json.dumps(d.tags), d.source.value),
-        )
-        self._index_fts(d.id, KnowledgeType.DECISION, f"{d.summary} {d.rationale}")
+        self._add_decision_no_commit(d)
         self.conn.commit()
 
     def get_decisions(self, limit: int = 50) -> list[Decision]:
@@ -384,16 +440,7 @@ class KnowledgeStore:
     # --- Pitfalls ---
 
     def add_pitfall(self, p: Pitfall) -> None:
-        self.conn.execute(
-            """INSERT OR REPLACE INTO pitfalls
-            (id, category, severity, description, code_pattern, how_to_prevent,
-             evidence, frequency, first_seen, last_seen, source)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (p.id, p.category.value, p.severity.value, p.description,
-             p.code_pattern, p.how_to_prevent, json.dumps(p.evidence),
-             p.frequency, p.first_seen, p.last_seen, p.source.value),
-        )
-        self._index_fts(p.id, KnowledgeType.PITFALL, f"{p.description} {p.how_to_prevent}")
+        self._add_pitfall_no_commit(p)
         self.conn.commit()
 
     def get_pitfalls(self, category: PitfallCategory | None = None) -> list[Pitfall]:
@@ -426,14 +473,7 @@ class KnowledgeStore:
     # --- Patterns ---
 
     def add_pattern(self, p: CodePattern) -> None:
-        self.conn.execute(
-            """INSERT OR REPLACE INTO patterns
-            (id, name, description, ast_pattern, file_glob, frequency, examples)
-            VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (p.id, p.name, p.description, p.ast_pattern,
-             p.file_glob, p.frequency, json.dumps(p.examples)),
-        )
-        self._index_fts(p.id, KnowledgeType.PATTERN, f"{p.name} {p.description}")
+        self._add_pattern_no_commit(p)
         self.conn.commit()
 
     def get_patterns(self) -> list[CodePattern]:
@@ -682,9 +722,17 @@ class KnowledgeStore:
 
     def _add_convention_no_commit(self, c: Convention) -> None:
         self.conn.execute(
-            """INSERT OR REPLACE INTO conventions
+            """INSERT INTO conventions
             (id, category, pattern, description, evidence, confidence, frequency, first_seen, last_seen, source)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(category, pattern) DO UPDATE SET
+                description = CASE WHEN LENGTH(excluded.description) > LENGTH(description)
+                    THEN excluded.description ELSE description END,
+                confidence = MAX(confidence, excluded.confidence),
+                frequency = MAX(frequency, excluded.frequency),
+                last_seen = excluded.last_seen,
+                evidence = excluded.evidence,
+                source = excluded.source""",
             (c.id, c.category.value, c.pattern, c.description,
              json.dumps(c.evidence), c.confidence, c.frequency,
              c.first_seen, c.last_seen, c.source.value),
@@ -693,9 +741,17 @@ class KnowledgeStore:
 
     def _add_decision_no_commit(self, d: Decision) -> None:
         self.conn.execute(
-            """INSERT OR REPLACE INTO decisions
+            """INSERT INTO decisions
             (id, summary, rationale, commit_sha, author, decided_at, file_paths, tags, source)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(summary, commit_sha) DO UPDATE SET
+                rationale = CASE WHEN LENGTH(excluded.rationale) > LENGTH(rationale)
+                    THEN excluded.rationale ELSE rationale END,
+                file_paths = excluded.file_paths,
+                tags = excluded.tags,
+                author = excluded.author,
+                decided_at = excluded.decided_at,
+                source = excluded.source""",
             (d.id, d.summary, d.rationale, d.commit_sha, d.author,
              d.decided_at, json.dumps(d.file_paths), json.dumps(d.tags), d.source.value),
         )
@@ -703,10 +759,26 @@ class KnowledgeStore:
 
     def _add_pitfall_no_commit(self, p: Pitfall) -> None:
         self.conn.execute(
-            """INSERT OR REPLACE INTO pitfalls
+            """INSERT INTO pitfalls
             (id, category, severity, description, code_pattern, how_to_prevent,
              evidence, frequency, first_seen, last_seen, source)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(category, description) DO UPDATE SET
+                code_pattern = excluded.code_pattern,
+                how_to_prevent = CASE WHEN LENGTH(excluded.how_to_prevent) > LENGTH(how_to_prevent)
+                    THEN excluded.how_to_prevent ELSE how_to_prevent END,
+                severity = CASE
+                    WHEN excluded.severity IN ('critical','high','medium','low','info')
+                        AND severity IN ('critical','high','medium','low','info')
+                    THEN CASE
+                        WHEN instr('critical,high,medium,low,info', excluded.severity)
+                           < instr('critical,high,medium,low,info', severity)
+                        THEN excluded.severity ELSE severity END
+                    ELSE severity END,
+                frequency = MAX(frequency, excluded.frequency),
+                last_seen = excluded.last_seen,
+                evidence = excluded.evidence,
+                source = excluded.source""",
             (p.id, p.category.value, p.severity.value, p.description,
              p.code_pattern, p.how_to_prevent, json.dumps(p.evidence),
              p.frequency, p.first_seen, p.last_seen, p.source.value),
@@ -715,9 +787,14 @@ class KnowledgeStore:
 
     def _add_pattern_no_commit(self, p: CodePattern) -> None:
         self.conn.execute(
-            """INSERT OR REPLACE INTO patterns
+            """INSERT INTO patterns
             (id, name, description, ast_pattern, file_glob, frequency, examples)
-            VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(name, ast_pattern) DO UPDATE SET
+                description = excluded.description,
+                file_glob = excluded.file_glob,
+                frequency = MAX(frequency, excluded.frequency),
+                examples = excluded.examples""",
             (p.id, p.name, p.description, p.ast_pattern,
              p.file_glob, p.frequency, json.dumps(p.examples)),
         )
