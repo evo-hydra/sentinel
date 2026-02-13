@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from sentinel.core.knowledge import KnowledgeStore
 
+from sentinel.models.enums import KnowledgeSource
 from sentinel.models.knowledge import CoChange, Convention, Decision, HotFile, Pitfall
 
 # Extensions to exclude from hot file output (noise, not signal)
@@ -94,11 +95,13 @@ def format_project_context(store: KnowledgeStore) -> str:
 
     Returns a comprehensive markdown document with all knowledge types.
     """
+    from sentinel import __version__
+
     project_name = store.get_meta("project_name", "unknown")
     stats = store.stats()
 
     parts: list[str] = []
-    parts.append(f"# Sentinel: {project_name}\n")
+    parts.append(f"# Sentinel v{__version__}: {project_name}\n")
     parts.append(
         f"Knowledge base: {stats['conventions']} conventions, "
         f"{stats['decisions']} decisions, {stats['pitfalls']} pitfalls, "
@@ -163,6 +166,12 @@ def format_project_context(store: KnowledgeStore) -> str:
         if remaining > 0:
             parts.append(f"\n*...and {remaining} more files with churn >= 10.*")
         parts.append("")
+
+        # Failure pattern summary for fragile files
+        fp_section = _format_failure_patterns(hot_files)
+        if fp_section:
+            parts.append(fp_section)
+            parts.append("")
 
     return "\n".join(parts)
 
@@ -243,8 +252,15 @@ def format_pitfalls(
             "info": "   ",
         }.get(p.severity.value, "   ")
 
+        # Add prefix for special sources
+        desc = p.description
+        if p.source == KnowledgeSource.REVERT:
+            desc = f"REVERTED APPROACH: {desc}"
+        elif p.source == KnowledgeSource.PR_REVIEW:
+            desc = f"PR FEEDBACK: {desc}"
+
         source_tag = f" [{p.source.value}]" if p.source.value != "git_history" else ""
-        parts.append(f"- {severity_icon} **[{p.severity.value}]** {p.description}{source_tag} (id: {p.id[:8]})")
+        parts.append(f"- {severity_icon} **[{p.severity.value}]** {desc}{source_tag} (id: {p.id[:8]})")
         if p.how_to_prevent:
             parts.append(f"  *Prevent:* {p.how_to_prevent}")
         if p.code_pattern:
@@ -341,6 +357,12 @@ def format_hot_files(
         parts.append(_hot_file_table(tier_c, None))  # no co-change for Tier C
         parts.append("")
 
+    # Failure pattern summary for fragile files
+    fp_section = _format_failure_patterns(filtered)
+    if fp_section:
+        parts.append(fp_section)
+        parts.append("")
+
     skipped = len(hot_files) - len(filtered)
     if skipped > 0:
         parts.append(
@@ -378,6 +400,22 @@ def _hot_file_table(
             lines.append(f"| `{hf.file_path}` | {risk} | {frag_str} |")
 
     return "\n".join(lines)
+
+
+def _format_failure_patterns(files: list[HotFile]) -> str:
+    """Render failure pattern summary for fragile files (fragility >= 30%)."""
+    fragile = [hf for hf in files if _fragility_ratio(hf) >= 0.3 and hf.failure_patterns]
+    if not fragile:
+        return ""
+
+    parts: list[str] = ["\n### Failure Patterns\n"]
+    parts.append("*Common failure modes in fragile files (fragility >= 30%):*\n")
+    for hf in fragile:
+        sorted_patterns = sorted(hf.failure_patterns.items(), key=lambda x: x[1], reverse=True)
+        pattern_str = ", ".join(f"{name} ({count})" for name, count in sorted_patterns[:5])
+        parts.append(f"- `{hf.file_path}`: {pattern_str}")
+
+    return "\n".join(parts)
 
 
 def format_co_changes(

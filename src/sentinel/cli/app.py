@@ -43,6 +43,7 @@ def init(
     max_commits: int = typer.Option(500, "--max-commits", help="Maximum commits to analyze."),
     enrich: bool = typer.Option(False, "--enrich", help="Run LLM-powered enrichment after analysis."),
     embed: bool = typer.Option(False, "--embed", help="Generate embeddings for semantic search after analysis."),
+    github: bool = typer.Option(False, "--github", help="Ingest PR review comments from GitHub."),
 ) -> None:
     """Initialize Sentinel in a project. Creates .sentinel/ and learns from git history."""
     from sentinel.core.analyzer import GitAnalyzer
@@ -82,6 +83,9 @@ def init(
 
         if embed:
             _run_embedding(store, sentinel_dir)
+
+        if github:
+            _run_github_ingestion(store, git_root)
 
         stats = store.stats()
 
@@ -189,6 +193,26 @@ def _run_embedding(store: KnowledgeStore, sentinel_dir: Path) -> None:
             store.store_embedding(eid, etype, vec, provider.model_name)
 
     theme.success(f"Embedded {len(entries)} knowledge entries.")
+
+
+def _run_github_ingestion(store: KnowledgeStore, git_root: Path) -> None:
+    """Ingest PR review comments from GitHub and store as pitfalls."""
+    from sentinel.core.github import ingest_pr_comments
+
+    hot_files = store.get_hot_files(limit=200)
+    hot_file_paths = {hf.file_path for hf in hot_files}
+
+    theme.info("Ingesting PR review comments from GitHub...")
+    pitfalls = ingest_pr_comments(git_root, hot_file_paths)
+
+    if not pitfalls:
+        theme.muted("No PR review pitfalls found.")
+        return
+
+    for p in pitfalls:
+        store.add_pitfall(p)
+
+    theme.success(f"Ingested {len(pitfalls)} pitfalls from PR review comments.")
 
 
 # Import and register sub-command groups

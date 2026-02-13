@@ -247,7 +247,8 @@ def test_top_co_change_partner_skips_noise(tmp_path: Path) -> None:
 
 def test_project_context_full(populated_store: KnowledgeStore) -> None:
     result = format_project_context(populated_store)
-    assert "# Sentinel: test-project" in result
+    assert "# Sentinel v" in result
+    assert "test-project" in result
     assert "conventions" in result.lower()
     assert "pitfalls" in result.lower()
     assert "decisions" in result.lower()
@@ -267,7 +268,8 @@ def test_project_context_empty(tmp_path: Path) -> None:
     store.set_meta("project_name", "empty")
     result = format_project_context(store)
     store.close()
-    assert "# Sentinel: empty" in result
+    assert "# Sentinel v" in result
+    assert "empty" in result
     assert "0 conventions" in result
 
 

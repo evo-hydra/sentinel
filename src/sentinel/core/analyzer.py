@@ -36,6 +36,21 @@ _FIX_PATTERNS = re.compile(
 # Patterns that indicate a revert
 _REVERT_PATTERN = re.compile(r"^revert\b", re.I)
 
+# Pattern to extract original SHA from revert commit body
+_REVERT_SHA_PATTERN = re.compile(r"This reverts commit ([a-f0-9]{7,40})")
+
+# Failure category regexes for classifying fix commits
+_FAILURE_CATEGORIES: dict[str, re.Pattern[str]] = {
+    "null_handling": re.compile(r"\b(null|none|nil|undefined|NoneType|optional)\b", re.I),
+    "type_error":    re.compile(r"\b(type.?error|cast|coercion|type.?mismatch|typing)\b", re.I),
+    "validation":    re.compile(r"\b(valid|invalid|validate|constraint|required|missing)\b", re.I),
+    "parsing":       re.compile(r"\b(pars[ei]|format|serial|deserial|JSON|decode|encode)\b", re.I),
+    "auth":          re.compile(r"\b(auth|permission|token|session|credential|login|access)\b", re.I),
+    "config":        re.compile(r"\b(config|setting|env|environment|flag|option)\b", re.I),
+    "state":         re.compile(r"\b(state|race|concurrent|lock|deadlock|lifecycle)\b", re.I),
+    "boundary":      re.compile(r"\b(off.?by|overflow|underflow|bound|index|range|edge.?case)\b", re.I),
+}
+
 # Common commit prefixes for convention detection
 _COMMIT_PREFIX = re.compile(r"^(feat|fix|docs|style|refactor|test|chore|ci|perf|build)(\(.+?\))?:")
 
@@ -47,6 +62,11 @@ _PASCAL_CASE = re.compile(r"^[A-Z][a-zA-Z0-9]*\.[a-z]+$")
 
 
 logger = logging.getLogger(__name__)
+
+
+def _classify_failure(text: str) -> list[str]:
+    """Classify a fix commit's text into failure categories."""
+    return [name for name, pattern in _FAILURE_CATEGORIES.items() if pattern.search(text)]
 
 
 class GitAnalyzer:
@@ -226,17 +246,48 @@ class GitAnalyzer:
         """Extract pitfalls from reverts and bug fixes."""
         pitfalls: list[Pitfall] = []
 
+        # Build SHA lookup for revert-pair linking
+        sha_to_commit = {c["sha"]: c for c in commits}
+
         for c in commits:
             subject = c["subject"]
 
             if _REVERT_PATTERN.match(subject):
-                pitfalls.append(Pitfall(
-                    category=PitfallCategory.BUG,
-                    severity=Severity.HIGH,
-                    description=f"Reverted: {subject}",
-                    how_to_prevent=f"Review changes to: {', '.join(c['files'][:5])}",
-                    evidence=[c["sha"]],
-                ))
+                # Try to link to original commit via SHA in body
+                original = None
+                body = c.get("body", "")
+                sha_match = _REVERT_SHA_PATTERN.search(body)
+                if sha_match:
+                    original_sha = sha_match.group(1)
+                    # Match by prefix (git log may use abbreviated SHAs)
+                    for sha, commit in sha_to_commit.items():
+                        if sha.startswith(original_sha) or original_sha.startswith(sha):
+                            original = commit
+                            break
+
+                if original:
+                    files_str = ", ".join(original["files"][:5])
+                    pitfalls.append(Pitfall(
+                        category=PitfallCategory.BUG,
+                        severity=Severity.HIGH,
+                        description=f"Reverted: {original['subject']} (original: {original['sha'][:7]}, revert: {c['sha'][:7]})",
+                        how_to_prevent=(
+                            f"The approach '{original['subject']}' was tried and reverted. "
+                            f"Files: {files_str}. "
+                            f"Original rationale: {original.get('body', '')[:200]}"
+                        ),
+                        evidence=[c["sha"], original["sha"]],
+                        source=KnowledgeSource.REVERT,
+                    ))
+                else:
+                    pitfalls.append(Pitfall(
+                        category=PitfallCategory.BUG,
+                        severity=Severity.HIGH,
+                        description=f"Reverted: {subject}",
+                        how_to_prevent=f"Review changes to: {', '.join(c['files'][:5])}",
+                        evidence=[c["sha"]],
+                        source=KnowledgeSource.REVERT,
+                    ))
 
             elif _FIX_PATTERNS.search(subject):
                 sev = Severity.MEDIUM
@@ -264,15 +315,24 @@ class GitAnalyzer:
         file_metrics: dict[str, dict[str, int]] = defaultdict(
             lambda: {"changes": 0, "fixes": 0, "reverts": 0}
         )
+        file_failure_patterns: dict[str, Counter[str]] = defaultdict(Counter)
 
         for c in commits:
             is_fix = bool(_FIX_PATTERNS.search(c["subject"]))
             is_revert = bool(_REVERT_PATTERN.match(c["subject"]))
 
+            # Classify failure categories for fix commits
+            categories: list[str] = []
+            if is_fix:
+                text = f"{c['subject']} {c.get('body', '')}"
+                categories = _classify_failure(text)
+
             for f in c["files"]:
                 file_metrics[f]["changes"] += 1
                 if is_fix:
                     file_metrics[f]["fixes"] += 1
+                    for cat in categories:
+                        file_failure_patterns[f][cat] += 1
                 if is_revert:
                     file_metrics[f]["reverts"] += 1
 
@@ -283,6 +343,7 @@ class GitAnalyzer:
                 change_count=m["changes"],
                 bug_fix_count=m["fixes"],
                 revert_count=m["reverts"],
+                failure_patterns=dict(file_failure_patterns.get(fp, {})),
             )
             hf.compute_churn()
             hot_files.append(hf)

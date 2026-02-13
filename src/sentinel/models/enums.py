@@ -55,6 +55,8 @@ class KnowledgeSource(str, Enum):
     MANUAL = "manual"
     INFERRED = "inferred"
     CROSS_PROJECT = "cross_project"
+    REVERT = "revert"
+    PR_REVIEW = "pr_review"
 
 
 class FeedbackOutcome(str, Enum):

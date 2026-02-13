@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sentinel_meta (
@@ -94,11 +94,12 @@ CREATE TABLE IF NOT EXISTS patterns (
 );
 
 CREATE TABLE IF NOT EXISTS hot_files (
-    file_path     TEXT PRIMARY KEY,
-    change_count  INTEGER NOT NULL DEFAULT 0,
-    bug_fix_count INTEGER NOT NULL DEFAULT 0,
-    revert_count  INTEGER NOT NULL DEFAULT 0,
-    churn_score   REAL NOT NULL DEFAULT 0.0
+    file_path        TEXT PRIMARY KEY,
+    change_count     INTEGER NOT NULL DEFAULT 0,
+    bug_fix_count    INTEGER NOT NULL DEFAULT 0,
+    revert_count     INTEGER NOT NULL DEFAULT 0,
+    churn_score      REAL NOT NULL DEFAULT 0.0,
+    failure_patterns TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS co_changes (
@@ -287,12 +288,23 @@ def _migrate_v5_to_v6(conn: sqlite3.Connection) -> None:
     """)
 
 
+def _migrate_v6_to_v7(conn: sqlite3.Connection) -> None:
+    """Add failure_patterns column to hot_files for failure pattern clustering."""
+    try:
+        conn.execute(
+            "ALTER TABLE hot_files ADD COLUMN failure_patterns TEXT NOT NULL DEFAULT '{}'"
+        )
+    except sqlite3.OperationalError:
+        logger.debug("Column 'failure_patterns' already exists on hot_files, skipping")
+
+
 _MIGRATIONS: dict[int, Any] = {
     1: _migrate_v1_to_v2,
     2: _migrate_v2_to_v3,
     3: _migrate_v3_to_v4,
     4: _migrate_v4_to_v5,
     5: _migrate_v5_to_v6,
+    6: _migrate_v6_to_v7,
 }
 
 
@@ -364,7 +376,14 @@ class KnowledgeStore:
             ).fetchall()
         }
         if "embeddings" in tables:
-            return SCHEMA_VERSION
+            # Could be v6 or v7 — check for failure_patterns column on hot_files
+            hot_cols = {
+                row["name"]
+                for row in self.conn.execute("PRAGMA table_info(hot_files)").fetchall()
+            }
+            if "failure_patterns" in hot_cols:
+                return 7
+            return 6
         if "shared_patterns" in tables:
             # Could be v4 or v5 — check for content indexes
             indexes = {
@@ -575,18 +594,7 @@ class KnowledgeStore:
     # --- Hot files ---
 
     def upsert_hot_file(self, hf: HotFile) -> None:
-        self.conn.execute(
-            """INSERT INTO hot_files (file_path, change_count, bug_fix_count, revert_count, churn_score)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(file_path) DO UPDATE SET
-                change_count = change_count + excluded.change_count,
-                bug_fix_count = bug_fix_count + excluded.bug_fix_count,
-                revert_count = revert_count + excluded.revert_count,
-                churn_score = (change_count + excluded.change_count)
-                    + (bug_fix_count + excluded.bug_fix_count) * 3
-                    + (revert_count + excluded.revert_count) * 5""",
-            (hf.file_path, hf.change_count, hf.bug_fix_count, hf.revert_count, hf.churn_score),
-        )
+        self._upsert_hot_file_no_commit(hf)
         self.conn.commit()
 
     def get_hot_files(self, limit: int = 20, offset: int = 0) -> list[HotFile]:
@@ -594,13 +602,7 @@ class KnowledgeStore:
             "SELECT * FROM hot_files ORDER BY churn_score DESC LIMIT ? OFFSET ?",
             (limit, offset),
         ).fetchall()
-        return [HotFile(
-            file_path=r["file_path"],
-            change_count=r["change_count"],
-            bug_fix_count=r["bug_fix_count"],
-            revert_count=r["revert_count"],
-            churn_score=r["churn_score"],
-        ) for r in rows]
+        return [self._row_to_hot_file(r) for r in rows]
 
     def get_hot_file(self, file_path: str) -> HotFile | None:
         row = self.conn.execute(
@@ -608,12 +610,18 @@ class KnowledgeStore:
         ).fetchone()
         if not row:
             return None
+        return self._row_to_hot_file(row)
+
+    def _row_to_hot_file(self, row: sqlite3.Row) -> HotFile:
+        fp_raw = row["failure_patterns"]
+        failure_patterns: dict[str, int] = json.loads(fp_raw) if fp_raw else {}
         return HotFile(
             file_path=row["file_path"],
             change_count=row["change_count"],
             bug_fix_count=row["bug_fix_count"],
             revert_count=row["revert_count"],
             churn_score=row["churn_score"],
+            failure_patterns=failure_patterns,
         )
 
     # --- Co-changes ---
@@ -890,18 +898,36 @@ class KnowledgeStore:
         self._index_fts(p.id, KnowledgeType.PATTERN, f"{p.name} {p.description}")
 
     def _upsert_hot_file_no_commit(self, hf: HotFile) -> None:
-        self.conn.execute(
-            """INSERT INTO hot_files (file_path, change_count, bug_fix_count, revert_count, churn_score)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(file_path) DO UPDATE SET
-                change_count = change_count + excluded.change_count,
-                bug_fix_count = bug_fix_count + excluded.bug_fix_count,
-                revert_count = revert_count + excluded.revert_count,
-                churn_score = (change_count + excluded.change_count)
-                    + (bug_fix_count + excluded.bug_fix_count) * 3
-                    + (revert_count + excluded.revert_count) * 5""",
-            (hf.file_path, hf.change_count, hf.bug_fix_count, hf.revert_count, hf.churn_score),
-        )
+        existing = self.conn.execute(
+            "SELECT change_count, bug_fix_count, revert_count, failure_patterns FROM hot_files WHERE file_path = ?",
+            (hf.file_path,),
+        ).fetchone()
+        if existing:
+            new_changes = existing["change_count"] + hf.change_count
+            new_fixes = existing["bug_fix_count"] + hf.bug_fix_count
+            new_reverts = existing["revert_count"] + hf.revert_count
+            new_churn = new_changes + new_fixes * 3 + new_reverts * 5
+            # Merge failure_patterns by summing counts
+            old_fp: dict[str, int] = json.loads(existing["failure_patterns"]) if existing["failure_patterns"] else {}
+            merged_fp = dict(old_fp)
+            for k, v in hf.failure_patterns.items():
+                merged_fp[k] = merged_fp.get(k, 0) + v
+            self.conn.execute(
+                """UPDATE hot_files SET
+                    change_count = ?, bug_fix_count = ?, revert_count = ?,
+                    churn_score = ?, failure_patterns = ?
+                WHERE file_path = ?""",
+                (new_changes, new_fixes, new_reverts, new_churn,
+                 json.dumps(merged_fp), hf.file_path),
+            )
+        else:
+            self.conn.execute(
+                """INSERT INTO hot_files
+                    (file_path, change_count, bug_fix_count, revert_count, churn_score, failure_patterns)
+                VALUES (?, ?, ?, ?, ?, ?)""",
+                (hf.file_path, hf.change_count, hf.bug_fix_count, hf.revert_count,
+                 hf.churn_score, json.dumps(hf.failure_patterns)),
+            )
 
     def _upsert_co_change_no_commit(self, cc: CoChange) -> None:
         a, b = sorted([cc.file_a, cc.file_b])

@@ -87,6 +87,7 @@ class HotFile:
     bug_fix_count: int = 0
     revert_count: int = 0
     churn_score: float = 0.0
+    failure_patterns: dict[str, int] = field(default_factory=dict)
 
     def compute_churn(self) -> float:
         """Compute churn score: changes + bug_fixes*3 + reverts*5."""

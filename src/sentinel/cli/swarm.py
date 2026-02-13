@@ -16,6 +16,7 @@ def swarm(
     json_output: bool = typer.Option(False, "--json", "-j", help="Output JSON."),
     enrich: bool = typer.Option(False, "--enrich", help="Run LLM-powered enrichment after analysis."),
     embed: bool = typer.Option(False, "--embed", help="Generate embeddings for semantic search after analysis."),
+    github: bool = typer.Option(False, "--github", help="Ingest PR review comments from GitHub."),
 ) -> None:
     """Analyze the repo and learn from git history."""
     from sentinel.core.analyzer import GitAnalyzer
@@ -61,6 +62,10 @@ def swarm(
         if embed and not json_output:
             from sentinel.cli.app import _run_embedding
             _run_embedding(store, sentinel_dir)
+
+        if github and not json_output:
+            from sentinel.cli.app import _run_github_ingestion
+            _run_github_ingestion(store, git_root)
 
         stats = store.stats()
 
