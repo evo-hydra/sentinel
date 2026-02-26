@@ -278,6 +278,7 @@ class GitAnalyzer:
                         ),
                         evidence=[c["sha"], original["sha"]],
                         source=KnowledgeSource.REVERT,
+                        file_paths=original["files"][:20],
                     ))
                 else:
                     pitfalls.append(Pitfall(
@@ -287,6 +288,7 @@ class GitAnalyzer:
                         how_to_prevent=f"Review changes to: {', '.join(c['files'][:5])}",
                         evidence=[c["sha"]],
                         source=KnowledgeSource.REVERT,
+                        file_paths=c["files"][:20],
                     ))
 
             elif _FIX_PATTERNS.search(subject):
@@ -306,6 +308,7 @@ class GitAnalyzer:
                     description=subject,
                     how_to_prevent=c["body"][:300] if c["body"] else "",
                     evidence=[c["sha"]],
+                    file_paths=c["files"][:20],
                 ))
 
         return pitfalls

@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sentinel_meta (
@@ -80,7 +80,8 @@ CREATE TABLE IF NOT EXISTS pitfalls (
     last_seen      TEXT NOT NULL,
     source         TEXT NOT NULL DEFAULT 'git_history',
     accepted_count INTEGER NOT NULL DEFAULT 0,
-    rejected_count INTEGER NOT NULL DEFAULT 0
+    rejected_count INTEGER NOT NULL DEFAULT 0,
+    file_paths     TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE TABLE IF NOT EXISTS patterns (
@@ -298,6 +299,16 @@ def _migrate_v6_to_v7(conn: sqlite3.Connection) -> None:
         logger.debug("Column 'failure_patterns' already exists on hot_files, skipping")
 
 
+def _migrate_v7_to_v8(conn: sqlite3.Connection) -> None:
+    """Add file_paths column to pitfalls for file-scoped matching."""
+    try:
+        conn.execute(
+            "ALTER TABLE pitfalls ADD COLUMN file_paths TEXT NOT NULL DEFAULT '[]'"
+        )
+    except sqlite3.OperationalError:
+        logger.debug("Column 'file_paths' already exists on pitfalls, skipping")
+
+
 _MIGRATIONS: dict[int, Any] = {
     1: _migrate_v1_to_v2,
     2: _migrate_v2_to_v3,
@@ -305,6 +316,7 @@ _MIGRATIONS: dict[int, Any] = {
     4: _migrate_v4_to_v5,
     5: _migrate_v5_to_v6,
     6: _migrate_v6_to_v7,
+    7: _migrate_v7_to_v8,
 }
 
 
@@ -382,6 +394,13 @@ class KnowledgeStore:
                 for row in self.conn.execute("PRAGMA table_info(hot_files)").fetchall()
             }
             if "failure_patterns" in hot_cols:
+                # Could be v7 or v8 — check for file_paths on pitfalls
+                pit_cols = {
+                    row["name"]
+                    for row in self.conn.execute("PRAGMA table_info(pitfalls)").fetchall()
+                }
+                if "file_paths" in pit_cols:
+                    return 8
                 return 7
             return 6
         if "shared_patterns" in tables:
@@ -561,6 +580,7 @@ class KnowledgeStore:
             first_seen=row["first_seen"],
             last_seen=row["last_seen"],
             source=KnowledgeSource(row["source"]),
+            file_paths=json.loads(row["file_paths"]),
         )
 
     # --- Patterns ---
@@ -858,8 +878,8 @@ class KnowledgeStore:
         self.conn.execute(
             """INSERT INTO pitfalls
             (id, category, severity, description, code_pattern, how_to_prevent,
-             evidence, frequency, first_seen, last_seen, source)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             evidence, frequency, first_seen, last_seen, source, file_paths)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(category, description) DO UPDATE SET
                 code_pattern = excluded.code_pattern,
                 how_to_prevent = CASE WHEN LENGTH(excluded.how_to_prevent) > LENGTH(how_to_prevent)
@@ -875,10 +895,12 @@ class KnowledgeStore:
                 frequency = MAX(frequency, excluded.frequency),
                 last_seen = excluded.last_seen,
                 evidence = excluded.evidence,
-                source = excluded.source""",
+                source = excluded.source,
+                file_paths = excluded.file_paths""",
             (p.id, p.category.value, p.severity.value, p.description,
              p.code_pattern, p.how_to_prevent, json.dumps(p.evidence),
-             p.frequency, p.first_seen, p.last_seen, p.source.value),
+             p.frequency, p.first_seen, p.last_seen, p.source.value,
+             json.dumps(p.file_paths)),
         )
         self._index_fts(p.id, KnowledgeType.PITFALL, f"{p.description} {p.how_to_prevent}")
 

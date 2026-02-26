@@ -165,6 +165,12 @@ class VerificationEngine:
         for pit in (self._pitfalls or []):
             if not pit.code_pattern:
                 continue
+            # Scope to specific files if file_paths is set
+            if pit.file_paths and not any(
+                rel_path == fp or rel_path.startswith(fp.rstrip("/") + "/")
+                for fp in pit.file_paths
+            ):
+                continue
             try:
                 pattern = re.compile(pit.code_pattern)
             except re.error:

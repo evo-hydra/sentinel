@@ -65,6 +65,7 @@ class Pitfall:
     first_seen: str = field(default_factory=_now)
     last_seen: str = field(default_factory=_now)
     source: KnowledgeSource = KnowledgeSource.GIT_HISTORY
+    file_paths: list[str] = field(default_factory=list)
 
 
 @dataclass
