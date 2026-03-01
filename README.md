@@ -508,6 +508,22 @@ mypy src/sentinel/ --ignore-missing-imports         # Types
 
 ---
 
+## Part of the EvoIntel MCP Suite
+
+Sentinel solves **AI Blindness #1: Project History** — conventions, pitfalls, and architectural decisions locked in git that no model can see.
+
+Part of the [EvoIntel MCP Suite](https://evolvingintelligence.ai) by Evolving Intelligence AI: five tools for five blindnesses no model improvement will ever fix.
+
+| Tool | Blindness | Install |
+|------|-----------|---------|
+| **Sentinel** | Project History | `pip install git-sentinel` |
+| [Niobe](https://github.com/evo-hydra/niobe) | Runtime Behavior | `pip install niobe` |
+| [Merovingian](https://github.com/evo-hydra/merovingian) | Cross-Service Dependencies | `pip install merovingian` |
+| [Seraph](https://github.com/evo-hydra/seraph) | Code Quality | `pip install seraph-ai` |
+| [Anno](https://github.com/evo-hydra/anno) | Web Content | `npm install -g @evointel/anno` |
+
+---
+
 ## License
 
 MIT
