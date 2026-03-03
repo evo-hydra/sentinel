@@ -26,6 +26,7 @@ from sentinel.mcp.formatters import (
     format_pitfalls,
     format_project_context,
     format_query_results,
+    format_solutions,
 )
 
 # Lazy import: mcp is optional — only required when main() is called.
@@ -178,23 +179,31 @@ def create_server() -> FastMCP:
             store.close()
 
     @mcp.tool()
-    def sentinel_pitfalls(limit: int = 50, offset: int = 0) -> str:
+    def sentinel_pitfalls(
+        limit: int = 50,
+        offset: int = 0,
+        file_path: str | None = None,
+    ) -> str:
         """List known pitfalls and how to prevent them.
 
         Check this before modifying risky areas. Pitfalls are learned from
         past reverts, bug fixes, and known issues in the codebase.
         Supports pagination via limit/offset.
 
+        When editing a specific file, pass file_path to get only pitfalls
+        relevant to that file — avoids returning all pitfalls as noise.
+
         Args:
             limit: Max pitfalls to return (default 50)
             offset: Number of pitfalls to skip (default 0)
+            file_path: Filter to pitfalls associated with this file path (optional)
         """
         store = _open_store()
         if store is None:
             return _no_sentinel_msg()
         try:
-            pitfalls = store.get_pitfalls(limit=limit, offset=offset)
-            total = store.count_pitfalls()
+            pitfalls = store.get_pitfalls(limit=limit, offset=offset, file_path=file_path)
+            total = store.count_pitfalls(file_path=file_path)
             return format_pitfalls(pitfalls, total=total, offset=offset)
         finally:
             store.close()
@@ -281,6 +290,89 @@ def create_server() -> FastMCP:
                 f"Feedback recorded: {outcome} on {knowledge_id[:8]}... "
                 f"({len(feedback_list)} total feedback entries for this item)"
             )
+        finally:
+            store.close()
+
+    @mcp.tool()
+    def sentinel_solution_save(
+        error_message: str,
+        solution_text: str,
+        commit_ref: str = "",
+        file_paths: list[str] | None = None,
+        tags: list[str] | None = None,
+    ) -> str:
+        """Save a debugging solution linked to an error message.
+
+        The error message is fingerprinted so the same error from different
+        files/lines can be matched to this solution later.
+
+        Args:
+            error_message: The error text (will be fingerprinted)
+            solution_text: How to fix the error
+            commit_ref: Optional commit SHA where fix was applied
+            file_paths: Optional list of files involved
+            tags: Optional tags for categorization
+        """
+        from sentinel.core.fingerprint import fingerprint
+        from sentinel.models.knowledge import Solution
+
+        store = _open_store()
+        if store is None:
+            return _no_sentinel_msg()
+        try:
+            sol = Solution(
+                error_fingerprint=fingerprint(error_message),
+                error_message=error_message,
+                solution_text=solution_text,
+                commit_ref=commit_ref,
+                file_paths=file_paths or [],
+                tags=tags or [],
+            )
+            store.add_solution(sol)
+            return (
+                f"Solution saved (id: {sol.id[:8]}). "
+                f"Fingerprint: {sol.error_fingerprint[:12]}..."
+            )
+        finally:
+            store.close()
+
+    @mcp.tool()
+    def sentinel_solution_search(query: str, limit: int = 5) -> str:
+        """Search for debugging solutions matching an error message.
+
+        First tries exact fingerprint match (same error = instant recall),
+        then falls back to full-text search on error messages and solutions.
+
+        Args:
+            query: Error message or keywords to search for
+            limit: Max results to return (default 5)
+        """
+        store = _open_store()
+        if store is None:
+            return _no_sentinel_msg()
+        try:
+            solutions = store.search_solutions(query, limit=limit)
+            return format_solutions(solutions, query=query)
+        finally:
+            store.close()
+
+    @mcp.tool()
+    def sentinel_solution_verify(solution_id: str) -> str:
+        """Mark a solution as verified (confirmed to work).
+
+        Verified solutions are ranked higher in search results.
+
+        Args:
+            solution_id: ID of the solution to verify (first 8+ chars)
+        """
+        store = _open_store()
+        if store is None:
+            return _no_sentinel_msg()
+        try:
+            success = store.verify_solution(solution_id)
+            if success:
+                return f"Solution {solution_id[:8]} marked as verified."
+            return f"Solution {solution_id[:8]} not found."
         finally:
             store.close()
 

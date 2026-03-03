@@ -25,6 +25,7 @@ from sentinel.models.knowledge import (
     Feedback,
     HotFile,
     Pitfall,
+    Solution,
 )
 
 if TYPE_CHECKING:
@@ -32,7 +33,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sentinel_meta (
@@ -148,6 +149,21 @@ CREATE TABLE IF NOT EXISTS embeddings (
 );
 CREATE INDEX IF NOT EXISTS idx_embeddings_type ON embeddings(knowledge_type);
 
+CREATE TABLE IF NOT EXISTS solutions (
+    id                TEXT PRIMARY KEY,
+    error_fingerprint TEXT NOT NULL,
+    error_message     TEXT NOT NULL,
+    solution_text     TEXT NOT NULL,
+    commit_ref        TEXT NOT NULL DEFAULT '',
+    file_paths        TEXT NOT NULL DEFAULT '[]',
+    tags              TEXT NOT NULL DEFAULT '[]',
+    verified          INTEGER NOT NULL DEFAULT 0,
+    verify_count      INTEGER NOT NULL DEFAULT 0,
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_solutions_fingerprint ON solutions(error_fingerprint);
+
 """
 
 _CONTENT_INDEXES = """
@@ -161,6 +177,12 @@ _FTS_SCHEMA = """
 CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
     knowledge_id,
     knowledge_type,
+    content,
+    tokenize='porter unicode61'
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS solutions_fts USING fts5(
+    solution_id,
     content,
     tokenize='porter unicode61'
 );
@@ -309,6 +331,34 @@ def _migrate_v7_to_v8(conn: sqlite3.Connection) -> None:
         logger.debug("Column 'file_paths' already exists on pitfalls, skipping")
 
 
+def _migrate_v8_to_v9(conn: sqlite3.Connection) -> None:
+    """Add solutions table and FTS index for debugging memory."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS solutions (
+            id                TEXT PRIMARY KEY,
+            error_fingerprint TEXT NOT NULL,
+            error_message     TEXT NOT NULL,
+            solution_text     TEXT NOT NULL,
+            commit_ref        TEXT NOT NULL DEFAULT '',
+            file_paths        TEXT NOT NULL DEFAULT '[]',
+            tags              TEXT NOT NULL DEFAULT '[]',
+            verified          INTEGER NOT NULL DEFAULT 0,
+            verify_count      INTEGER NOT NULL DEFAULT 0,
+            created_at        TEXT NOT NULL,
+            updated_at        TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_solutions_fingerprint ON solutions(error_fingerprint);
+    """)
+    try:
+        conn.executescript("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS solutions_fts USING fts5(
+                solution_id, content, tokenize='porter unicode61'
+            );
+        """)
+    except sqlite3.OperationalError:
+        pass  # FTS5 not available
+
+
 _MIGRATIONS: dict[int, Any] = {
     1: _migrate_v1_to_v2,
     2: _migrate_v2_to_v3,
@@ -317,6 +367,7 @@ _MIGRATIONS: dict[int, Any] = {
     5: _migrate_v5_to_v6,
     6: _migrate_v6_to_v7,
     7: _migrate_v7_to_v8,
+    8: _migrate_v8_to_v9,
 }
 
 
@@ -394,12 +445,15 @@ class KnowledgeStore:
                 for row in self.conn.execute("PRAGMA table_info(hot_files)").fetchall()
             }
             if "failure_patterns" in hot_cols:
-                # Could be v7 or v8 — check for file_paths on pitfalls
+                # Could be v7, v8, or v9 — check for file_paths on pitfalls
                 pit_cols = {
                     row["name"]
                     for row in self.conn.execute("PRAGMA table_info(pitfalls)").fetchall()
                 }
                 if "file_paths" in pit_cols:
+                    # Could be v8 or v9 — check for solutions table
+                    if "solutions" in tables:
+                        return 9
                     return 8
                 return 7
             return 6
@@ -544,27 +598,44 @@ class KnowledgeStore:
         category: PitfallCategory | None = None,
         limit: int = 50,
         offset: int = 0,
+        file_path: str | None = None,
     ) -> list[Pitfall]:
+        conditions: list[str] = []
+        params: list[object] = []
         if category:
-            rows = self.conn.execute(
-                "SELECT * FROM pitfalls WHERE category = ? ORDER BY frequency DESC LIMIT ? OFFSET ?",
-                (category.value, limit, offset),
-            ).fetchall()
-        else:
-            rows = self.conn.execute(
-                "SELECT * FROM pitfalls ORDER BY frequency DESC LIMIT ? OFFSET ?",
-                (limit, offset),
-            ).fetchall()
+            conditions.append("category = ?")
+            params.append(category.value)
+        if file_path:
+            conditions.append("json_each.value LIKE ?")
+            params.append(f"%{file_path}%")
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        join = ", json_each(file_paths)" if file_path else ""
+        params.extend([limit, offset])
+        rows = self.conn.execute(
+            f"SELECT DISTINCT pitfalls.* FROM pitfalls{join} {where} ORDER BY frequency DESC LIMIT ? OFFSET ?",
+            params,
+        ).fetchall()
         return [self._row_to_pitfall(r) for r in rows]
 
-    def count_pitfalls(self, category: PitfallCategory | None = None) -> int:
+    def count_pitfalls(
+        self,
+        category: PitfallCategory | None = None,
+        file_path: str | None = None,
+    ) -> int:
+        conditions: list[str] = []
+        params: list[object] = []
         if category:
-            row = self.conn.execute(
-                "SELECT COUNT(*) as cnt FROM pitfalls WHERE category = ?",
-                (category.value,),
-            ).fetchone()
-        else:
-            row = self.conn.execute("SELECT COUNT(*) as cnt FROM pitfalls").fetchone()
+            conditions.append("category = ?")
+            params.append(category.value)
+        if file_path:
+            conditions.append("json_each.value LIKE ?")
+            params.append(f"%{file_path}%")
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        join = ", json_each(file_paths)" if file_path else ""
+        row = self.conn.execute(
+            f"SELECT COUNT(DISTINCT pitfalls.id) as cnt FROM pitfalls{join} {where}",
+            params,
+        ).fetchone()
         return row["cnt"] if row else 0
 
     def _row_to_pitfall(self, row: sqlite3.Row) -> Pitfall:
@@ -776,6 +847,149 @@ class KnowledgeStore:
         )
         self.conn.commit()
 
+    # --- Solutions ---
+
+    def add_solution(self, s: Solution) -> None:
+        """Insert or update a solution by fingerprint.
+
+        Uses UPSERT to atomically insert or update. Does not mutate
+        the input Solution object.
+        """
+        from sentinel.core.fingerprint import fingerprint as compute_fingerprint
+        from sentinel.models.knowledge import _now
+
+        error_fp = s.error_fingerprint or compute_fingerprint(s.error_message)
+        now = _now()
+
+        self.conn.execute(
+            """INSERT INTO solutions
+            (id, error_fingerprint, error_message, solution_text, commit_ref,
+             file_paths, tags, verified, verify_count, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(error_fingerprint) DO UPDATE SET
+                solution_text = excluded.solution_text,
+                commit_ref = excluded.commit_ref,
+                file_paths = excluded.file_paths,
+                tags = excluded.tags,
+                updated_at = excluded.updated_at""",
+            (s.id, error_fp, s.error_message, s.solution_text,
+             s.commit_ref, json.dumps(s.file_paths), json.dumps(s.tags),
+             int(s.verified), s.verify_count, s.created_at, now),
+        )
+
+        # Get the actual stored ID for FTS indexing (may be pre-existing)
+        row = self.conn.execute(
+            "SELECT id FROM solutions WHERE error_fingerprint = ?",
+            (error_fp,),
+        ).fetchone()
+        stored_id = row["id"] if row else s.id
+
+        self._index_solution_fts(stored_id, s.error_message, s.solution_text)
+        self.conn.commit()
+
+    def search_solutions(self, query: str, limit: int = 5) -> list[Solution]:
+        """Search solutions by fingerprint exact match, then FTS5 fallback."""
+        from sentinel.core.fingerprint import fingerprint
+
+        fp = fingerprint(query)
+        rows = self.conn.execute(
+            "SELECT * FROM solutions WHERE error_fingerprint = ? LIMIT ?",
+            (fp, limit),
+        ).fetchall()
+        if rows:
+            return [self._row_to_solution(r) for r in rows]
+
+        # FTS5 fallback
+        try:
+            fts_rows = self.conn.execute(
+                """SELECT s.* FROM solutions_fts f
+                JOIN solutions s ON s.id = f.solution_id
+                WHERE solutions_fts MATCH ?
+                LIMIT ?""",
+                (query, limit),
+            ).fetchall()
+            if fts_rows:
+                return [self._row_to_solution(r) for r in fts_rows]
+        except sqlite3.OperationalError:
+            pass  # FTS5 not available
+
+        # LIKE fallback
+        like_query = f"%{query}%"
+        rows = self.conn.execute(
+            """SELECT * FROM solutions
+            WHERE error_message LIKE ? OR solution_text LIKE ?
+            LIMIT ?""",
+            (like_query, like_query, limit),
+        ).fetchall()
+        return [self._row_to_solution(r) for r in rows]
+
+    def verify_solution(self, solution_id: str) -> bool:
+        """Mark a solution as verified and increment verify_count."""
+        from sentinel.models.knowledge import _now
+
+        now = _now()
+        cursor = self.conn.execute(
+            """UPDATE solutions SET verified = 1, verify_count = verify_count + 1,
+               updated_at = ? WHERE id LIKE (? || '%')""",
+            (now, solution_id),
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def get_solutions(
+        self, limit: int = 20, offset: int = 0, verified_only: bool = False,
+    ) -> list[Solution]:
+        """List solutions with pagination."""
+        if verified_only:
+            rows = self.conn.execute(
+                "SELECT * FROM solutions WHERE verified = 1 ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM solutions ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+        return [self._row_to_solution(r) for r in rows]
+
+    def count_solutions(self, verified_only: bool = False) -> int:
+        """Count solutions."""
+        if verified_only:
+            row = self.conn.execute(
+                "SELECT COUNT(*) as cnt FROM solutions WHERE verified = 1",
+            ).fetchone()
+        else:
+            row = self.conn.execute("SELECT COUNT(*) as cnt FROM solutions").fetchone()
+        return row["cnt"] if row else 0
+
+    def _row_to_solution(self, row: sqlite3.Row) -> Solution:
+        return Solution(
+            id=row["id"],
+            error_fingerprint=row["error_fingerprint"],
+            error_message=row["error_message"],
+            solution_text=row["solution_text"],
+            commit_ref=row["commit_ref"],
+            file_paths=json.loads(row["file_paths"]),
+            tags=json.loads(row["tags"]),
+            verified=bool(row["verified"]),
+            verify_count=row["verify_count"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def _index_solution_fts(self, solution_id: str, error_msg: str, solution_text: str) -> None:
+        """Index a solution in the solutions_fts table."""
+        try:
+            self.conn.execute(
+                "DELETE FROM solutions_fts WHERE solution_id = ?", (solution_id,),
+            )
+            self.conn.execute(
+                "INSERT INTO solutions_fts (solution_id, content) VALUES (?, ?)",
+                (solution_id, f"{error_msg} {solution_text}"),
+            )
+        except sqlite3.OperationalError:
+            logger.debug("Solutions FTS5 index failed for %s", solution_id)
+
     # --- FTS5 search ---
 
     def _index_fts(self, knowledge_id: str, ktype: KnowledgeType, content: str) -> None:
@@ -965,7 +1179,7 @@ class KnowledgeStore:
 
     _KNOWN_TABLES = frozenset(
         {"conventions", "decisions", "pitfalls", "patterns", "hot_files", "co_changes",
-         "feedback", "shared_patterns", "embeddings"}
+         "feedback", "shared_patterns", "embeddings", "solutions"}
     )
 
     def stats(self) -> dict[str, int]:
