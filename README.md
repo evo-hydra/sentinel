@@ -31,7 +31,7 @@ It is a **read-only intelligence surface** over your repository.
 A human provisions memory for the agent:
 
 ```bash
-pip install git-sentinel[mcp]    # Core + MCP server
+pip install git-sentinel          # Core + MCP server
 cd your-project
 sentinel init                      # Learn from git history
 sentinel init --embed              # Learn + generate embeddings for semantic search
