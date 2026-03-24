@@ -116,6 +116,41 @@ class TestSolutionCRUD:
         solutions = knowledge_store.get_solutions()
         assert solutions[0].solution_text == "Better solution"
 
+    def test_duplicate_fingerprint_fts_after_update(self, knowledge_store: KnowledgeStore):
+        """Verify FTS5 index works correctly after an update via duplicate fingerprint."""
+        error_msg = "ImportError: cannot import name 'foo'"
+        sol1 = Solution(
+            error_message=error_msg,
+            solution_text="Install foo package",
+        )
+        knowledge_store.add_solution(sol1)
+
+        # Update with same fingerprint, different solution text
+        sol2 = Solution(
+            error_message=error_msg,
+            solution_text="Use bar package instead of foo",
+        )
+        knowledge_store.add_solution(sol2)
+
+        # Count should still be 1
+        assert knowledge_store.count_solutions() == 1
+
+        # Content should be updated
+        solutions = knowledge_store.get_solutions()
+        assert solutions[0].solution_text == "Use bar package instead of foo"
+
+        # FTS5 search should find the UPDATED content
+        results = knowledge_store.search_solutions("bar package")
+        assert len(results) >= 1
+        assert results[0].solution_text == "Use bar package instead of foo"
+
+        # FTS5 search for OLD content should NOT find it
+        results_old = knowledge_store.search_solutions("Install foo package")
+        # Old content might still match on "foo" from error_message, but
+        # solution_text should be the updated one
+        for r in results_old:
+            assert r.solution_text == "Use bar package instead of foo"
+
     def test_count_solutions(self, knowledge_store: KnowledgeStore):
         assert knowledge_store.count_solutions() == 0
 

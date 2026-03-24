@@ -886,8 +886,10 @@ class KnowledgeStore:
     def add_solution(self, s: Solution) -> None:
         """Insert or update a solution by fingerprint.
 
-        Uses UPSERT to atomically insert or update. Does not mutate
-        the input Solution object.
+        Uses explicit SELECT→UPDATE/INSERT instead of UPSERT to avoid
+        ON CONFLICT clause failures when the UNIQUE INDEX on
+        error_fingerprint isn't recognized (migration edge cases,
+        older SQLite builds). Does not mutate the input Solution object.
         """
         from sentinel.core.fingerprint import fingerprint as compute_fingerprint
         from sentinel.models.knowledge import _now
@@ -895,28 +897,32 @@ class KnowledgeStore:
         error_fp = s.error_fingerprint or compute_fingerprint(s.error_message)
         now = _now()
 
-        self.conn.execute(
-            """INSERT INTO solutions
-            (id, error_fingerprint, error_message, solution_text, commit_ref,
-             file_paths, tags, verified, verify_count, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(error_fingerprint) DO UPDATE SET
-                solution_text = excluded.solution_text,
-                commit_ref = excluded.commit_ref,
-                file_paths = excluded.file_paths,
-                tags = excluded.tags,
-                updated_at = excluded.updated_at""",
-            (s.id, error_fp, s.error_message, s.solution_text,
-             s.commit_ref, json.dumps(s.file_paths), json.dumps(s.tags),
-             int(s.verified), s.verify_count, s.created_at, now),
-        )
-
-        # Get the actual stored ID for FTS indexing (may be pre-existing)
-        row = self.conn.execute(
+        existing = self.conn.execute(
             "SELECT id FROM solutions WHERE error_fingerprint = ?",
             (error_fp,),
         ).fetchone()
-        stored_id = row["id"] if row else s.id
+
+        if existing:
+            stored_id = existing["id"]
+            self.conn.execute(
+                """UPDATE solutions SET
+                    solution_text = ?, commit_ref = ?, file_paths = ?,
+                    tags = ?, updated_at = ?
+                WHERE error_fingerprint = ?""",
+                (s.solution_text, s.commit_ref, json.dumps(s.file_paths),
+                 json.dumps(s.tags), now, error_fp),
+            )
+        else:
+            stored_id = s.id
+            self.conn.execute(
+                """INSERT INTO solutions
+                (id, error_fingerprint, error_message, solution_text, commit_ref,
+                 file_paths, tags, verified, verify_count, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (s.id, error_fp, s.error_message, s.solution_text,
+                 s.commit_ref, json.dumps(s.file_paths), json.dumps(s.tags),
+                 int(s.verified), s.verify_count, s.created_at, now),
+            )
 
         self._index_solution_fts(stored_id, s.error_message, s.solution_text)
         self.conn.commit()
