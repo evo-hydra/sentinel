@@ -476,3 +476,34 @@ def format_solutions(
         parts.append(f"*{' | '.join(meta)}*\n")
 
     return "\n".join(parts)
+
+
+def format_health_check(result: dict) -> str:
+    """Format a health check result for LLM consumption."""
+    checks = result.get("checks", {})
+    issues = result.get("issues_found", 0)
+    commit = result.get("commit_sha", "")[:8]
+    check_id = result.get("id", "")[:8]
+
+    parts: list[str] = [
+        f"## Health Check (id: {check_id})",
+        f"**Commit:** {commit}",
+        f"**Issues found:** {issues}",
+        "",
+    ]
+
+    for check_name, check_data in checks.items():
+        status = check_data.get("status", "unknown")
+        icon = "pass" if status == "pass" else "FAIL" if status == "fail" else "skip"
+        parts.append(f"- **[{icon}]** {check_name}")
+        if details := check_data.get("details"):
+            if isinstance(details, list):
+                for d in details[:10]:
+                    parts.append(f"  - {d}")
+            else:
+                parts.append(f"  - {details}")
+
+    if not checks:
+        parts.append("*No checks were run.*")
+
+    return "\n".join(parts)

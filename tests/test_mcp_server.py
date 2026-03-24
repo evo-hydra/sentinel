@@ -400,3 +400,112 @@ def test_mcp_setup_global_merges_existing(tmp_path: Path, monkeypatch: pytest.Mo
     assert "anno" in loaded["mcpServers"]
     assert "sentinel" in loaded["mcpServers"]
     assert loaded["numStartups"] == 42  # other keys preserved
+
+
+# --- Health Check ---
+
+
+@pytest.fixture
+def health_check_project(tmp_path: Path) -> Path:
+    """Create a project with .sentinel/, git, pyproject.toml, and tests."""
+    import subprocess
+
+    project = tmp_path / "healthproject"
+    project.mkdir()
+
+    # Init git
+    subprocess.run(["git", "init"], cwd=project, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=project, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=project, capture_output=True)
+
+    # Create project structure
+    (project / "pyproject.toml").write_text('[project]\nversion = "1.0.0"\n')
+    src = project / "src" / "mylib"
+    src.mkdir(parents=True)
+    (src / "__init__.py").write_text('__version__ = "1.0.0"\n')
+
+    tests_dir = project / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_main.py").write_text(
+        "def test_one(): pass\ndef test_two(): pass\ndef test_three(): pass\n"
+    )
+
+    # Initial commit
+    subprocess.run(["git", "add", "."], cwd=project, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=project, capture_output=True)
+
+    # Init sentinel
+    sentinel_dir = project / ".sentinel"
+    sentinel_dir.mkdir()
+    store = KnowledgeStore(sentinel_dir / "sentinel.db")
+    store.open()
+    store.set_meta("project_name", "healthproject")
+    store.close()
+
+    return project
+
+
+class TestHealthCheck:
+    def test_basic_health_check(self, health_check_project: Path) -> None:
+        """Health check runs all checks and stores results."""
+        server = create_server()
+        tools = {t.name: t for t in server._tool_manager.list_tools()}
+        tool_fn = tools["sentinel_health_check"].fn
+
+        result = tool_fn(project_root=str(health_check_project))
+        assert "Health Check" in result
+        assert "version_consistency" in result
+        assert "[pass]" in result
+        assert "3 test functions" in result
+
+        # Verify stored in DB
+        sentinel_dir = health_check_project / ".sentinel"
+        store = KnowledgeStore(sentinel_dir / "sentinel.db")
+        store.open()
+        last = store.get_last_health_check()
+        store.close()
+        assert last is not None
+        assert last["issues_found"] == 0
+
+    def test_version_mismatch_detected(self, health_check_project: Path) -> None:
+        """Health check detects version mismatch between pyproject.toml and __init__.py."""
+        # Create a mismatch
+        init_file = health_check_project / "src" / "mylib" / "__init__.py"
+        init_file.write_text('__version__ = "0.9.0"\n')
+
+        server = create_server()
+        tools = {t.name: t for t in server._tool_manager.list_tools()}
+        tool_fn = tools["sentinel_health_check"].fn
+
+        result = tool_fn(project_root=str(health_check_project))
+        assert "FAIL" in result
+        assert "0.9.0" in result
+
+    def test_second_check_shows_delta(self, health_check_project: Path) -> None:
+        """Second health check shows commits since last check."""
+        import subprocess
+
+        server = create_server()
+        tools = {t.name: t for t in server._tool_manager.list_tools()}
+        tool_fn = tools["sentinel_health_check"].fn
+
+        # First check
+        tool_fn(project_root=str(health_check_project))
+
+        # Add a commit
+        (health_check_project / "new_file.py").write_text("x = 1\n")
+        subprocess.run(["git", "add", "."], cwd=health_check_project, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "add file"], cwd=health_check_project, capture_output=True)
+
+        # Second check
+        result = tool_fn(project_root=str(health_check_project))
+        assert "1 commits since last check" in result
+
+    def test_no_sentinel_dir(self) -> None:
+        """Health check without .sentinel/ returns init message."""
+        server = create_server()
+        tools = {t.name: t for t in server._tool_manager.list_tools()}
+        tool_fn = tools["sentinel_health_check"].fn
+
+        result = tool_fn(project_root="/nonexistent/path")
+        assert "No `.sentinel/`" in result

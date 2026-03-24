@@ -45,7 +45,7 @@ def _safe_json_loads(raw: str | None, default: Any = None, context: str = "") ->
         return default if default is not None else []
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sentinel_meta (
@@ -175,6 +175,14 @@ CREATE TABLE IF NOT EXISTS solutions (
     updated_at        TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_solutions_fingerprint ON solutions(error_fingerprint);
+
+CREATE TABLE IF NOT EXISTS health_checks (
+    id            TEXT PRIMARY KEY,
+    created_at    TEXT NOT NULL,
+    commit_sha    TEXT NOT NULL DEFAULT '',
+    checks_json   TEXT NOT NULL DEFAULT '{}',
+    issues_found  INTEGER NOT NULL DEFAULT 0
+);
 
 """
 
@@ -371,6 +379,19 @@ def _migrate_v8_to_v9(conn: sqlite3.Connection) -> None:
         pass  # FTS5 not available
 
 
+def _migrate_v9_to_v10(conn: sqlite3.Connection) -> None:
+    """Add health_checks table for periodic whole-project sweeps."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS health_checks (
+            id            TEXT PRIMARY KEY,
+            created_at    TEXT NOT NULL,
+            commit_sha    TEXT NOT NULL DEFAULT '',
+            checks_json   TEXT NOT NULL DEFAULT '{}',
+            issues_found  INTEGER NOT NULL DEFAULT 0
+        );
+    """)
+
+
 _MIGRATIONS: dict[int, Any] = {
     1: _migrate_v1_to_v2,
     2: _migrate_v2_to_v3,
@@ -380,6 +401,7 @@ _MIGRATIONS: dict[int, Any] = {
     6: _migrate_v6_to_v7,
     7: _migrate_v7_to_v8,
     8: _migrate_v8_to_v9,
+    9: _migrate_v9_to_v10,
 }
 
 
@@ -1001,6 +1023,53 @@ class KnowledgeStore:
             )
         except sqlite3.OperationalError:
             logger.debug("Solutions FTS5 index failed for %s", solution_id)
+
+    # --- Health checks ---
+
+    def save_health_check(
+        self, check_id: str, commit_sha: str, checks: dict, issues_found: int,
+    ) -> None:
+        """Save a health check result."""
+        from sentinel.models.knowledge import _now
+
+        self.conn.execute(
+            "INSERT INTO health_checks (id, created_at, commit_sha, checks_json, issues_found) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (check_id, _now(), commit_sha, json.dumps(checks), issues_found),
+        )
+        self.conn.commit()
+
+    def get_last_health_check(self) -> dict | None:
+        """Get the most recent health check result."""
+        row = self.conn.execute(
+            "SELECT * FROM health_checks ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "created_at": row["created_at"],
+            "commit_sha": row["commit_sha"],
+            "checks": _safe_json_loads(row["checks_json"], default={}, context="health_check"),
+            "issues_found": row["issues_found"],
+        }
+
+    def count_commits_since(self, since_sha: str, project_root: str = "") -> int:
+        """Count git commits since a given SHA."""
+        from sentinel.core.git import safe_git_command
+
+        cwd = Path(project_root) if project_root else Path.cwd()
+        if not since_sha:
+            return 0
+        result = safe_git_command(
+            ["git", "rev-list", "--count", f"{since_sha}..HEAD"],
+            cwd=cwd, check=False,
+        )
+        count_str = result.stdout.strip()
+        try:
+            return int(count_str)
+        except ValueError:
+            return 0
 
     # --- FTS5 search ---
 

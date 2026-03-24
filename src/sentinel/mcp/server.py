@@ -22,6 +22,7 @@ from sentinel.mcp.formatters import (
     format_co_changes,
     format_conventions,
     format_decisions,
+    format_health_check,
     format_hot_files,
     format_pitfalls,
     format_project_context,
@@ -426,6 +427,156 @@ def create_server() -> FastMCP:
                 file_path, min_count=2, limit=limit, offset=offset,
             )
             return format_co_changes(file_path, co_changes, total=None, offset=offset)
+        finally:
+            store.close()
+
+    @mcp.tool()
+    def sentinel_health_check(project_root: str = "") -> str:
+        """Run a whole-project health sweep and store results.
+
+        Checks version consistency, commit count since last check,
+        test count, and dead imports. Results are stored in the DB
+        so subsequent calls can show deltas.
+
+        Args:
+            project_root: Explicit project path (use when CWD doesn't match project root)
+        """
+        import re
+        import subprocess
+        import uuid
+
+        from sentinel.core.git import git_rev_parse_head
+
+        store = _open_store(project_root=project_root)
+        if store is None:
+            return _no_sentinel_msg()
+
+        try:
+            root = Path(project_root).resolve() if project_root else Path.cwd().resolve()
+            checks: dict = {}
+            total_issues = 0
+
+            # 1. Version consistency
+            version_issues: list[str] = []
+            # Find pyproject.toml or package.json
+            pyproject = root / "pyproject.toml"
+            pkg_json = root / "package.json"
+            declared_version: str | None = None
+
+            if pyproject.is_file():
+                text = pyproject.read_text()
+                m = re.search(r'version\s*=\s*"([^"]+)"', text)
+                if m:
+                    declared_version = m.group(1)
+
+                    # Find __init__.py with __version__
+                    for init in root.rglob("__init__.py"):
+                        # Skip venv/node_modules
+                        parts = init.parts
+                        if any(p in parts for p in (".venv", "venv", "node_modules", ".git", "__pycache__")):
+                            continue
+                        init_text = init.read_text()
+                        vm = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', init_text)
+                        if vm:
+                            if vm.group(1) != declared_version:
+                                rel = init.relative_to(root)
+                                version_issues.append(
+                                    f"{rel}: __version__={vm.group(1)}, pyproject.toml={declared_version}"
+                                )
+
+            elif pkg_json.is_file():
+                import json
+                try:
+                    data = json.loads(pkg_json.read_text())
+                    declared_version = data.get("version")
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+            if version_issues:
+                checks["version_consistency"] = {"status": "fail", "details": version_issues}
+                total_issues += len(version_issues)
+            else:
+                checks["version_consistency"] = {
+                    "status": "pass",
+                    "details": f"version={declared_version}" if declared_version else "no version found",
+                }
+
+            # 2. Commits since last check
+            current_sha = git_rev_parse_head(root) or ""
+            last_check = store.get_last_health_check()
+            if last_check and last_check["commit_sha"]:
+                commits_since = store.count_commits_since(last_check["commit_sha"], str(root))
+                checks["commits_since_last_check"] = {
+                    "status": "pass",
+                    "details": f"{commits_since} commits since last check ({last_check['created_at'][:10]})",
+                }
+            else:
+                checks["commits_since_last_check"] = {
+                    "status": "pass",
+                    "details": "first health check",
+                }
+
+            # 3. Test count
+            test_count = 0
+            for test_file in root.rglob("test_*.py"):
+                parts = test_file.parts
+                if any(p in parts for p in (".venv", "venv", "node_modules", ".git", "__pycache__")):
+                    continue
+                text = test_file.read_text()
+                test_count += len(re.findall(r"def test_", text))
+            for test_file in root.rglob("*.test.ts"):
+                parts = test_file.parts
+                if any(p in parts for p in ("node_modules", ".git", "dist")):
+                    continue
+                text = test_file.read_text()
+                test_count += len(re.findall(r"(it|test)\(", text))
+
+            if last_check:
+                prev_checks = last_check.get("checks", {})
+                prev_test_count = prev_checks.get("test_count", {}).get("count", 0)
+                delta = test_count - prev_test_count
+                delta_str = f" ({'+' if delta >= 0 else ''}{delta} since last check)" if prev_test_count else ""
+            else:
+                delta_str = ""
+
+            checks["test_count"] = {
+                "status": "pass",
+                "details": f"{test_count} test functions found{delta_str}",
+                "count": test_count,
+            }
+
+            # 4. Dead imports (ruff F401)
+            try:
+                result = subprocess.run(
+                    ["ruff", "check", "--select", "F401", "--quiet", str(root)],
+                    capture_output=True, text=True, timeout=30,
+                )
+                if result.stdout.strip():
+                    dead_imports = [
+                        line.strip() for line in result.stdout.strip().split("\n")
+                        if line.strip()
+                    ]
+                    checks["dead_imports"] = {
+                        "status": "fail",
+                        "details": dead_imports[:20],
+                    }
+                    total_issues += len(dead_imports)
+                else:
+                    checks["dead_imports"] = {"status": "pass", "details": "no unused imports"}
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                checks["dead_imports"] = {"status": "skip", "details": "ruff not available"}
+
+            # Save result
+            check_id = uuid.uuid4().hex[:16]
+            store.save_health_check(check_id, current_sha, checks, total_issues)
+
+            result_dict = {
+                "id": check_id,
+                "commit_sha": current_sha,
+                "checks": checks,
+                "issues_found": total_issues,
+            }
+            return format_health_check(result_dict)
         finally:
             store.close()
 
