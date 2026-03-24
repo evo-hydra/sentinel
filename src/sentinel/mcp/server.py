@@ -49,11 +49,21 @@ def _find_sentinel_dir(start: Path | None = None) -> Path | None:
     return None
 
 
-def _open_store(sentinel_dir: Path | None = None) -> KnowledgeStore | None:
+def _resolve_sentinel_dir(project_root: str = "") -> Path | None:
+    """Resolve .sentinel/ directory from explicit project_root or CWD walk."""
+    if project_root:
+        candidate = Path(project_root).resolve() / ".sentinel"
+        if candidate.is_dir() and (candidate / "sentinel.db").is_file():
+            return candidate
+        return None
+    return _find_sentinel_dir()
+
+
+def _open_store(sentinel_dir: Path | None = None, project_root: str = "") -> KnowledgeStore | None:
     """Open a KnowledgeStore, or return None if .sentinel/ not found."""
     from sentinel.core.knowledge import KnowledgeStore
 
-    sd = sentinel_dir or _find_sentinel_dir()
+    sd = sentinel_dir or _resolve_sentinel_dir(project_root)
     if sd is None or not sd.is_dir():
         return None
     db_path = sd / "sentinel.db"
@@ -76,13 +86,14 @@ def _semantic_query(
     query: str,
     limit: int = 20,
     offset: int = 0,
+    project_root: str = "",
 ) -> list[dict]:
     """Run semantic search with graceful fallback to FTS5."""
     from sentinel.core.config import SentinelConfig
     from sentinel.core.embedding_provider import EmbeddingProviderError
     from sentinel.core.provider_factory import create_embedding_provider
 
-    sentinel_dir = _find_sentinel_dir()
+    sentinel_dir = _resolve_sentinel_dir(project_root)
     if sentinel_dir is None:
         return store.search(query, limit=limit, offset=offset)
 
@@ -114,13 +125,16 @@ def create_server() -> FastMCP:
     )
 
     @mcp.tool()
-    def sentinel_project_context() -> str:
+    def sentinel_project_context(project_root: str = "") -> str:
         """Get full project intelligence summary. Use at session start to prime with project knowledge.
 
         Returns conventions, pitfalls, architectural decisions, hot files —
         everything an AI needs to write project-consistent code.
+
+        Args:
+            project_root: Explicit project path (use when CWD doesn't match project root)
         """
-        store = _open_store()
+        store = _open_store(project_root=project_root)
         if store is None:
             return _no_sentinel_msg()
         try:
@@ -131,6 +145,7 @@ def create_server() -> FastMCP:
     @mcp.tool()
     def sentinel_query(
         query: str, limit: int = 20, offset: int = 0, semantic: bool = False,
+        project_root: str = "",
     ) -> str:
         """Free-text search across all project knowledge.
 
@@ -143,13 +158,14 @@ def create_server() -> FastMCP:
             limit: Max results to return (default 20)
             offset: Number of results to skip (default 0)
             semantic: Use semantic (embedding-based) search instead of FTS5 (default False)
+            project_root: Explicit project path (use when CWD doesn't match project root)
         """
-        store = _open_store()
+        store = _open_store(project_root=project_root)
         if store is None:
             return _no_sentinel_msg()
         try:
             if semantic and store.has_embeddings():
-                results = _semantic_query(store, query, limit=limit, offset=offset)
+                results = _semantic_query(store, query, limit=limit, offset=offset, project_root=project_root)
             else:
                 results = store.search(query, limit=limit, offset=offset)
             return format_query_results(results, query, total=None, offset=offset)
@@ -157,7 +173,7 @@ def create_server() -> FastMCP:
             store.close()
 
     @mcp.tool()
-    def sentinel_conventions(limit: int = 50, offset: int = 0) -> str:
+    def sentinel_conventions(limit: int = 50, offset: int = 0, project_root: str = "") -> str:
         """List project conventions with confidence scores.
 
         Check this before writing code to follow established patterns
@@ -167,8 +183,9 @@ def create_server() -> FastMCP:
         Args:
             limit: Max conventions to return (default 50)
             offset: Number of conventions to skip (default 0)
+            project_root: Explicit project path (use when CWD doesn't match project root)
         """
-        store = _open_store()
+        store = _open_store(project_root=project_root)
         if store is None:
             return _no_sentinel_msg()
         try:
@@ -183,6 +200,7 @@ def create_server() -> FastMCP:
         limit: int = 50,
         offset: int = 0,
         file_path: str | None = None,
+        project_root: str = "",
     ) -> str:
         """List known pitfalls and how to prevent them.
 
@@ -197,8 +215,9 @@ def create_server() -> FastMCP:
             limit: Max pitfalls to return (default 50)
             offset: Number of pitfalls to skip (default 0)
             file_path: Filter to pitfalls associated with this file path (optional)
+            project_root: Explicit project path (use when CWD doesn't match project root)
         """
-        store = _open_store()
+        store = _open_store(project_root=project_root)
         if store is None:
             return _no_sentinel_msg()
         try:
@@ -209,7 +228,7 @@ def create_server() -> FastMCP:
             store.close()
 
     @mcp.tool()
-    def sentinel_decisions(limit: int = 30, offset: int = 0) -> str:
+    def sentinel_decisions(limit: int = 30, offset: int = 0, project_root: str = "") -> str:
         """List architectural decisions with rationale.
 
         Use this to understand "why" things are done a certain way
@@ -219,8 +238,9 @@ def create_server() -> FastMCP:
         Args:
             limit: Max decisions to return (default 30)
             offset: Number of decisions to skip (default 0)
+            project_root: Explicit project path (use when CWD doesn't match project root)
         """
-        store = _open_store()
+        store = _open_store(project_root=project_root)
         if store is None:
             return _no_sentinel_msg()
         try:
@@ -231,14 +251,17 @@ def create_server() -> FastMCP:
             store.close()
 
     @mcp.tool()
-    def sentinel_hot_files() -> str:
+    def sentinel_hot_files(project_root: str = "") -> str:
         """List high-churn files ranked by risk score (churn x fragility).
 
         Files with frequent changes, bug fixes, or reverts are tiered by risk.
         Tier A/B files include their top co-change partner so you know what
         else to check when editing them.
+
+        Args:
+            project_root: Explicit project path (use when CWD doesn't match project root)
         """
-        store = _open_store()
+        store = _open_store(project_root=project_root)
         if store is None:
             return _no_sentinel_msg()
         try:
@@ -248,7 +271,7 @@ def create_server() -> FastMCP:
             store.close()
 
     @mcp.tool()
-    def sentinel_feedback(knowledge_id: str, outcome: str, context: str = "") -> str:
+    def sentinel_feedback(knowledge_id: str, outcome: str, context: str = "", project_root: str = "") -> str:
         """Submit feedback on a knowledge entry (convention, pitfall, decision).
 
         Use this after acting on Sentinel advice to help it learn which
@@ -258,6 +281,7 @@ def create_server() -> FastMCP:
             knowledge_id: ID of the knowledge entry (first 8+ chars from tool output)
             outcome: One of "accepted", "rejected", "modified"
             context: Optional explanation of why
+            project_root: Explicit project path (use when CWD doesn't match project root)
         """
         from sentinel.models.enums import FeedbackOutcome
         from sentinel.models.knowledge import Feedback
@@ -266,7 +290,7 @@ def create_server() -> FastMCP:
         if outcome not in valid:
             return f"Invalid outcome: {outcome}. Must be one of: {', '.join(sorted(valid))}"
 
-        store = _open_store()
+        store = _open_store(project_root=project_root)
         if store is None:
             return _no_sentinel_msg()
         try:
@@ -300,6 +324,7 @@ def create_server() -> FastMCP:
         commit_ref: str = "",
         file_paths: list[str] | None = None,
         tags: list[str] | None = None,
+        project_root: str = "",
     ) -> str:
         """Save a debugging solution linked to an error message.
 
@@ -312,11 +337,12 @@ def create_server() -> FastMCP:
             commit_ref: Optional commit SHA where fix was applied
             file_paths: Optional list of files involved
             tags: Optional tags for categorization
+            project_root: Explicit project path (use when CWD doesn't match project root)
         """
         from sentinel.core.fingerprint import fingerprint
         from sentinel.models.knowledge import Solution
 
-        store = _open_store()
+        store = _open_store(project_root=project_root)
         if store is None:
             return _no_sentinel_msg()
         try:
@@ -337,7 +363,7 @@ def create_server() -> FastMCP:
             store.close()
 
     @mcp.tool()
-    def sentinel_solution_search(query: str, limit: int = 5) -> str:
+    def sentinel_solution_search(query: str, limit: int = 5, project_root: str = "") -> str:
         """Search for debugging solutions matching an error message.
 
         First tries exact fingerprint match (same error = instant recall),
@@ -346,8 +372,9 @@ def create_server() -> FastMCP:
         Args:
             query: Error message or keywords to search for
             limit: Max results to return (default 5)
+            project_root: Explicit project path (use when CWD doesn't match project root)
         """
-        store = _open_store()
+        store = _open_store(project_root=project_root)
         if store is None:
             return _no_sentinel_msg()
         try:
@@ -357,15 +384,16 @@ def create_server() -> FastMCP:
             store.close()
 
     @mcp.tool()
-    def sentinel_solution_verify(solution_id: str) -> str:
+    def sentinel_solution_verify(solution_id: str, project_root: str = "") -> str:
         """Mark a solution as verified (confirmed to work).
 
         Verified solutions are ranked higher in search results.
 
         Args:
             solution_id: ID of the solution to verify (first 8+ chars)
+            project_root: Explicit project path (use when CWD doesn't match project root)
         """
-        store = _open_store()
+        store = _open_store(project_root=project_root)
         if store is None:
             return _no_sentinel_msg()
         try:
@@ -377,7 +405,7 @@ def create_server() -> FastMCP:
             store.close()
 
     @mcp.tool()
-    def sentinel_co_changes(file_path: str, limit: int = 50, offset: int = 0) -> str:
+    def sentinel_co_changes(file_path: str, limit: int = 50, offset: int = 0, project_root: str = "") -> str:
         """Find files that usually change together with the given file.
 
         When editing a file, check what else needs updating. Co-changes are
@@ -388,8 +416,9 @@ def create_server() -> FastMCP:
             file_path: Relative path to the file (e.g. "src/auth.py")
             limit: Max co-change pairs to return (default 50)
             offset: Number of pairs to skip (default 0)
+            project_root: Explicit project path (use when CWD doesn't match project root)
         """
-        store = _open_store()
+        store = _open_store(project_root=project_root)
         if store is None:
             return _no_sentinel_msg()
         try:

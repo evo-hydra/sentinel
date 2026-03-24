@@ -221,7 +221,7 @@ def test_mcp_sentinel_feedback(tmp_path: Path) -> None:
         conv_id = conv.id
 
     # Mock _open_store to return our test store
-    def mock_open_store(sentinel_dir=None):
+    def mock_open_store(sentinel_dir=None, project_root=""):
         s = KnowledgeStore(db_path)
         s.open()
         return s
