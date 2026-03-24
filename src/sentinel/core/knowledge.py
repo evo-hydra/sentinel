@@ -33,6 +33,18 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def _safe_json_loads(raw: str | None, default: Any = None, context: str = "") -> Any:
+    """Parse JSON from a database column, returning default on failure."""
+    if raw is None:
+        return default if default is not None else []
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("Corrupt JSON in DB column%s: %s", f" ({context})" if context else "", raw[:100])
+        return default if default is not None else []
+
+
 SCHEMA_VERSION = 9
 
 _SCHEMA = """
@@ -549,7 +561,7 @@ class KnowledgeStore:
             category=ConventionCategory(row["category"]),
             pattern=row["pattern"],
             description=row["description"],
-            evidence=json.loads(row["evidence"]),
+            evidence=_safe_json_loads(row["evidence"], default=[], context="convention.evidence"),
             confidence=row["confidence"],
             frequency=row["frequency"],
             first_seen=row["first_seen"],
@@ -582,8 +594,8 @@ class KnowledgeStore:
             commit_sha=row["commit_sha"],
             author=row["author"],
             decided_at=row["decided_at"],
-            file_paths=json.loads(row["file_paths"]),
-            tags=json.loads(row["tags"]),
+            file_paths=_safe_json_loads(row["file_paths"], default=[], context="decision.file_paths"),
+            tags=_safe_json_loads(row["tags"], default=[], context="decision.tags"),
             source=KnowledgeSource(row["source"]),
         )
 
@@ -646,12 +658,12 @@ class KnowledgeStore:
             description=row["description"],
             code_pattern=row["code_pattern"],
             how_to_prevent=row["how_to_prevent"],
-            evidence=json.loads(row["evidence"]),
+            evidence=_safe_json_loads(row["evidence"], default=[], context="pitfall.evidence"),
             frequency=row["frequency"],
             first_seen=row["first_seen"],
             last_seen=row["last_seen"],
             source=KnowledgeSource(row["source"]),
-            file_paths=json.loads(row["file_paths"]),
+            file_paths=_safe_json_loads(row["file_paths"], default=[], context="pitfall.file_paths"),
         )
 
     # --- Patterns ---
@@ -679,7 +691,7 @@ class KnowledgeStore:
             ast_pattern=row["ast_pattern"],
             file_glob=row["file_glob"],
             frequency=row["frequency"],
-            examples=json.loads(row["examples"]),
+            examples=_safe_json_loads(row["examples"], default=[], context="pattern.examples"),
         )
 
     # --- Hot files ---
@@ -969,8 +981,8 @@ class KnowledgeStore:
             error_message=row["error_message"],
             solution_text=row["solution_text"],
             commit_ref=row["commit_ref"],
-            file_paths=json.loads(row["file_paths"]),
-            tags=json.loads(row["tags"]),
+            file_paths=_safe_json_loads(row["file_paths"], default=[], context="solution.file_paths"),
+            tags=_safe_json_loads(row["tags"], default=[], context="solution.tags"),
             verified=bool(row["verified"]),
             verify_count=row["verify_count"],
             created_at=row["created_at"],
