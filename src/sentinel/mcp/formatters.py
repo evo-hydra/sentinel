@@ -25,6 +25,19 @@ _NOISE_EXTENSIONS = frozenset({
 _TIER_AB_MAX_ROWS = 25
 
 
+def _confidence_qualifier(confidence: float, frequency: int) -> str:
+    """Return a confidence qualifier based on confidence score and frequency.
+
+    Gives review agents signal to distinguish between verified patterns
+    and speculative ones, reducing false-positive investigation time.
+    """
+    if confidence >= 0.8 or frequency >= 5:
+        return "confirmed"
+    if confidence >= 0.5 or frequency >= 3:
+        return "likely"
+    return "suspected"
+
+
 def _is_noise_file(path: str) -> bool:
     """Return True if a file path is likely noise for hot-file analysis."""
     lower = path.lower()
@@ -117,8 +130,9 @@ def format_project_context(store: KnowledgeStore) -> str:
         parts.append("## Conventions\n")
         for c in conventions:
             desc = c.description or c.pattern
+            qualifier = _confidence_qualifier(c.confidence, c.frequency)
             parts.append(
-                f"- **[{c.category.value}]** {desc} "
+                f"- **[{c.category.value}]** [{qualifier}] {desc} "
                 f"(confidence: {c.confidence:.0%}, seen {c.frequency}x)"
             )
         parts.append("")
@@ -128,7 +142,8 @@ def format_project_context(store: KnowledgeStore) -> str:
     if pitfalls:
         parts.append("## Pitfalls\n")
         for p in pitfalls:
-            line = f"- **[{p.severity.value}]** {p.description}"
+            qualifier = _confidence_qualifier(0.5, p.frequency)
+            line = f"- **[{p.severity.value}]** [{qualifier}] {p.description}"
             if p.how_to_prevent:
                 line += f" — *prevent:* {p.how_to_prevent}"
             parts.append(line)
@@ -222,8 +237,9 @@ def format_conventions(
     parts: list[str] = ["## Conventions\n"]
     for c in conventions:
         desc = c.description or c.pattern
+        qualifier = _confidence_qualifier(c.confidence, c.frequency)
         parts.append(
-            f"- **[{c.category.value}]** {desc} (id: {c.id[:8]})\n"
+            f"- **[{c.category.value}]** [{qualifier}] {desc} (id: {c.id[:8]})\n"
             f"  Confidence: {c.confidence:.0%} | Frequency: {c.frequency} | "
             f"Source: {c.source.value}"
         )
@@ -261,8 +277,9 @@ def format_pitfalls(
         elif p.source == KnowledgeSource.PR_REVIEW:
             desc = f"PR FEEDBACK: {desc}"
 
+        qualifier = _confidence_qualifier(0.5, p.frequency)
         source_tag = f" [{p.source.value}]" if p.source.value != "git_history" else ""
-        parts.append(f"- {severity_icon} **[{p.severity.value}]** {desc}{source_tag} (id: {p.id[:8]})")
+        parts.append(f"- {severity_icon} **[{p.severity.value}]** [{qualifier}] {desc}{source_tag} (id: {p.id[:8]})")
         if p.how_to_prevent:
             parts.append(f"  *Prevent:* {p.how_to_prevent}")
         if p.code_pattern:
