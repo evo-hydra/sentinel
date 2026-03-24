@@ -18,3 +18,4 @@ htmlcov/
 *.sqlite
 .env
 .env.*
+.mcp.json

@@ -105,6 +105,22 @@ class CoChange:
 
 
 @dataclass
+class Solution:
+    """A debugging solution linked to an error fingerprint."""
+    id: str = field(default_factory=_uuid)
+    error_fingerprint: str = ""
+    error_message: str = ""
+    solution_text: str = ""
+    commit_ref: str = ""
+    file_paths: list[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
+    verified: bool = False
+    verify_count: int = 0
+    created_at: str = field(default_factory=_now)
+    updated_at: str = field(default_factory=_now)
+
+
+@dataclass
 class Feedback:
     """Feedback on a knowledge entry (convention, decision, pitfall)."""
     id: str = field(default_factory=_uuid)

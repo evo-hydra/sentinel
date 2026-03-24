@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from sentinel.core.knowledge import KnowledgeStore
 
 from sentinel.models.enums import KnowledgeSource
-from sentinel.models.knowledge import CoChange, Convention, Decision, HotFile, Pitfall
+from sentinel.models.knowledge import CoChange, Convention, Decision, HotFile, Pitfall, Solution
 
 # Extensions to exclude from hot file output (noise, not signal)
 _NOISE_EXTENSIONS = frozenset({
@@ -102,11 +102,13 @@ def format_project_context(store: KnowledgeStore) -> str:
 
     parts: list[str] = []
     parts.append(f"# Sentinel v{__version__}: {project_name}\n")
+    solutions_count = stats.get('solutions', 0)
+    solutions_part = f", {solutions_count} solutions" if solutions_count else ""
     parts.append(
         f"Knowledge base: {stats['conventions']} conventions, "
         f"{stats['decisions']} decisions, {stats['pitfalls']} pitfalls, "
         f"{stats['patterns']} patterns, {stats['hot_files']} tracked files, "
-        f"{stats['co_changes']} co-change pairs.\n"
+        f"{stats['co_changes']} co-change pairs{solutions_part}.\n"
     )
 
     # Conventions (top 10 by frequency)
@@ -441,5 +443,36 @@ def format_co_changes(
     parts.append(
         "*When editing the target file, check if these files also need updates.*"
     )
+
+    return "\n".join(parts)
+
+
+def format_solutions(
+    solutions: list[Solution],
+    query: str | None = None,
+) -> str:
+    """Format solution search results for LLM consumption."""
+    if not solutions:
+        if query:
+            return f"No solutions found for: `{query}`"
+        return "No solutions found."
+
+    header = f"## Solutions for `{query}`\n" if query else "## Solutions\n"
+    parts: list[str] = [header]
+
+    for s in solutions:
+        verified_tag = " [VERIFIED]" if s.verified else ""
+        parts.append(f"### {s.error_message[:80]}{verified_tag}")
+        parts.append(f"**Solution:** {s.solution_text}")
+        meta: list[str] = [f"id: {s.id[:8]}"]
+        if s.commit_ref:
+            meta.append(f"commit: {s.commit_ref[:8]}")
+        if s.verify_count:
+            meta.append(f"verified {s.verify_count}x")
+        if s.file_paths:
+            meta.append(f"files: {', '.join(f'`{f}`' for f in s.file_paths[:3])}")
+        if s.tags:
+            meta.append(f"tags: {', '.join(s.tags)}")
+        parts.append(f"*{' | '.join(meta)}*\n")
 
     return "\n".join(parts)
