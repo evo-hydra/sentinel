@@ -226,6 +226,7 @@ from sentinel.cli.pr_review import pr_review  # noqa: E402
 from sentinel.cli.share import share_app  # noqa: E402
 from sentinel.cli.swarm import swarm  # noqa: E402
 from sentinel.cli.watch import watch  # noqa: E402
+from sentinel.cli.whisper import whisper  # noqa: E402
 
 app.command()(hunt)
 app.command()(swarm)
@@ -234,6 +235,7 @@ app.command(name="mcp-setup")(mcp_setup)
 app.command()(enrich)
 app.command()(embed_cmd)
 app.command(name="pr-review")(pr_review)
+app.command()(whisper)
 app.add_typer(hive_app, name="hive", help="Manage knowledge entries.")
 app.add_typer(feedback_app, name="feedback", help="Submit and view feedback on knowledge entries.")
 app.add_typer(share_app, name="share", help="Export and import cross-project knowledge.")
