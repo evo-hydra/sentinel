@@ -7,6 +7,8 @@ from pathlib import Path
 
 import typer
 
+from sentinel.mcp.formatters import _confidence_qualifier
+
 
 def whisper(
     file_path: str = typer.Argument(..., help="File path to get context for."),
@@ -88,24 +90,4 @@ def _convention_relevant(convention: "Convention", file_path: str) -> bool:
         if len(part_lower) > 2 and (part_lower in evidence or part_lower in pattern):
             return True
 
-    # Category-based relevance — only if the convention description
-    # mentions something related to the file's context
-    desc_lower = (convention.description or "").lower()
-    cat = convention.category.value.lower()
-
-    if cat == "naming":
-        # Naming conventions relevant if they mention the file's module type
-        file_stem = Path(file_path).stem.lower()
-        if file_stem in desc_lower or any(kw in desc_lower for kw in (file_stem, "snake", "camel")):
-            return True
-
     return False
-
-
-def _confidence_qualifier(confidence: float, frequency: int) -> str:
-    """Return confidence tag: confirmed, likely, or suspected."""
-    if confidence >= 0.8 or frequency >= 5:
-        return "confirmed"
-    if confidence >= 0.5 or frequency >= 3:
-        return "likely"
-    return "suspected"

@@ -8,7 +8,8 @@ import pytest
 from typer.testing import CliRunner
 
 from sentinel.cli.app import app
-from sentinel.cli.whisper import _build_whisper, _confidence_qualifier
+from sentinel.cli.whisper import _build_whisper
+from sentinel.mcp.formatters import _confidence_qualifier
 from sentinel.core.knowledge import KnowledgeStore
 from sentinel.models.enums import ConventionCategory, KnowledgeSource
 from sentinel.models.knowledge import Convention, CoChange
