@@ -8,7 +8,7 @@ import pytest
 from typer.testing import CliRunner
 
 from sentinel.cli.app import app
-from sentinel.cli.whisper import _build_whisper
+from sentinel.cli.whisper import _build_whisper, _convention_contradicts
 from sentinel.mcp.formatters import _confidence_qualifier
 from sentinel.core.knowledge import KnowledgeStore
 from sentinel.models.enums import ConventionCategory, KnowledgeSource
@@ -124,3 +124,85 @@ def test_whisper_cli_exit_code(tmp_git_repo: Path, monkeypatch: pytest.MonkeyPat
     runner.invoke(app, ["init", str(tmp_git_repo)])
     result = runner.invoke(app, ["whisper", "nonexistent.py"])
     assert result.exit_code == 0
+
+
+# --- Contradict-only filtering tests ---
+
+
+def test_contradict_class_vs_function_convention(populated_store: KnowledgeStore) -> None:
+    """Convention says 'functions not classes' — creating a class is a contradiction."""
+    # Content with a class definition contradicts "services are functions" convention
+    class_content = "class BookmarkService:\n    def __init__(self):\n        pass"
+    output = _build_whisper(populated_store, "src/services.py", min_count=2, limit=10,
+                            content=class_content)
+
+    assert "Convention" in output
+    assert "functions" in output.lower()
+
+
+def test_no_contradiction_means_silent(populated_store: KnowledgeStore) -> None:
+    """Convention says 'functions not classes' — writing functions is not a contradiction."""
+    func_content = "def create_bookmark(db, url, title):\n    pass"
+    output = _build_whisper(populated_store, "src/services.py", min_count=2, limit=10,
+                            content=func_content)
+
+    # Co-changes should still appear, but convention should be filtered out
+    convention_lines = [l for l in output.split("\n") if l.startswith("Convention")]
+    assert len(convention_lines) == 0
+
+
+def test_all_flag_bypasses_contradiction_filter(populated_store: KnowledgeStore) -> None:
+    """The --all flag shows all conventions even when content matches."""
+    func_content = "def create_bookmark(db, url, title):\n    pass"
+    output = _build_whisper(populated_store, "src/services.py", min_count=2, limit=10,
+                            content=func_content, all_conventions=True)
+
+    # With --all, conventions should appear even though content doesn't contradict
+    convention_lines = [l for l in output.split("\n") if l.startswith("Convention")]
+    assert len(convention_lines) > 0
+
+
+def test_co_changes_always_shown_regardless_of_content(populated_store: KnowledgeStore) -> None:
+    """Co-changes appear whether or not content is provided."""
+    output = _build_whisper(populated_store, "src/services.py", min_count=2, limit=10,
+                            content="def something(): pass")
+
+    assert "Co-change" in output
+    assert "test_services.py" in output
+
+
+def test_no_content_shows_all_conventions(populated_store: KnowledgeStore) -> None:
+    """Without content, all relevant conventions shown (original behavior)."""
+    output = _build_whisper(populated_store, "src/services.py", min_count=2, limit=10,
+                            content="")
+
+    convention_lines = [l for l in output.split("\n") if l.startswith("Convention")]
+    assert len(convention_lines) > 0
+
+
+def test_contradict_snake_case(populated_store: KnowledgeStore) -> None:
+    """Convention says snake_case — camelCase definition is a contradiction."""
+    func_convention = Convention(
+        category=ConventionCategory.NAMING,
+        pattern="snake_case",
+        description="Use snake_case for function names",
+        evidence=["src/services.py"],
+        confidence=0.9,
+        frequency=10,
+    )
+    camel_content = "def getUserById(user_id):\n    pass"
+    assert _convention_contradicts(func_convention, camel_content) is True
+
+
+def test_no_contradict_snake_case(populated_store: KnowledgeStore) -> None:
+    """Convention says snake_case — snake_case definition is not a contradiction."""
+    func_convention = Convention(
+        category=ConventionCategory.NAMING,
+        pattern="snake_case",
+        description="Use snake_case for function names",
+        evidence=["src/services.py"],
+        confidence=0.9,
+        frequency=10,
+    )
+    snake_content = "def get_user_by_id(user_id):\n    pass"
+    assert _convention_contradicts(func_convention, snake_content) is False
