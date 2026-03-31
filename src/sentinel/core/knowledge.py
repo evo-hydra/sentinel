@@ -953,13 +953,26 @@ class KnowledgeStore:
         except sqlite3.OperationalError:
             pass  # FTS5 not available
 
-        # LIKE fallback
-        like_query = f"%{query}%"
+        # Word-level LIKE fallback — split query into keywords and require
+        # each one to appear somewhere in error_message or solution_text.
+        # Strips punctuation so "[PITFALL] datetime.utcnow timezone" matches
+        # "datetime.utcnow() creates timezone-naive datetimes".
+        import re as _re
+        words = [w for w in _re.sub(r'[^\w]', ' ', query).split() if len(w) > 2]
+        if not words:
+            return []
+
+        conditions = []
+        params: list[object] = []
+        for word in words:
+            conditions.append("(error_message LIKE ? OR solution_text LIKE ?)")
+            like = f"%{word}%"
+            params.extend([like, like])
+        params.append(limit)
+
         rows = self.conn.execute(
-            """SELECT * FROM solutions
-            WHERE error_message LIKE ? OR solution_text LIKE ?
-            LIMIT ?""",
-            (like_query, like_query, limit),
+            f"SELECT * FROM solutions WHERE {' AND '.join(conditions)} LIMIT ?",
+            params,
         ).fetchall()
         return [self._row_to_solution(r) for r in rows]
 
