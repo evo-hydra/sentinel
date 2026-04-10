@@ -173,7 +173,7 @@ def create_server() -> FastMCP:
         finally:
             store.close()
 
-    @mcp.tool()
+    # Internal function — subsumed by sentinel_project_context (v4 surface collapse)
     def sentinel_conventions(limit: int = 50, offset: int = 0, project_root: str = "") -> str:
         """List project conventions with confidence scores.
 
@@ -196,7 +196,7 @@ def create_server() -> FastMCP:
         finally:
             store.close()
 
-    @mcp.tool()
+    # Internal function — subsumed by sentinel_project_context (v4 surface collapse)
     def sentinel_pitfalls(
         limit: int = 50,
         offset: int = 0,
@@ -239,7 +239,7 @@ def create_server() -> FastMCP:
         finally:
             store.close()
 
-    @mcp.tool()
+    # Internal function — subsumed by sentinel_project_context (v4 surface collapse)
     def sentinel_decisions(limit: int = 30, offset: int = 0, project_root: str = "") -> str:
         """List architectural decisions with rationale.
 
@@ -262,7 +262,7 @@ def create_server() -> FastMCP:
         finally:
             store.close()
 
-    @mcp.tool()
+    # Internal function — subsumed by sentinel_project_context (v4 surface collapse)
     def sentinel_hot_files(project_root: str = "") -> str:
         """List high-churn files ranked by risk score (churn x fragility).
 
@@ -452,7 +452,7 @@ def create_server() -> FastMCP:
         finally:
             store.close()
 
-    @mcp.tool()
+    # Internal function — on-demand only, not routine (v4 surface collapse)
     def sentinel_health_check(project_root: str = "") -> str:
         """Run a whole-project health sweep and store results.
 

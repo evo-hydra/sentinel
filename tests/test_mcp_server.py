@@ -445,6 +445,7 @@ def health_check_project(tmp_path: Path) -> Path:
     return project
 
 
+@pytest.mark.skip(reason="sentinel_health_check removed from MCP surface in v4 collapse")
 class TestHealthCheck:
     def test_basic_health_check(self, health_check_project: Path) -> None:
         """Health check runs all checks and stores results."""
