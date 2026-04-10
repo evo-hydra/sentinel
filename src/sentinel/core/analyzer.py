@@ -21,6 +21,7 @@ from sentinel.models.knowledge import (
     Decision,
     HotFile,
     Pitfall,
+    PitfallPattern,
 )
 
 # Patterns that indicate a decision was made
@@ -100,6 +101,7 @@ class GitAnalyzer:
         result.conventions = self._extract_conventions(commits)
         result.decisions = self._extract_decisions(commits)
         result.pitfalls = self._extract_pitfalls(commits)
+        result.pitfall_patterns = self._generalize_pitfalls(result.pitfalls)
         result.hot_files = self._extract_hot_files(commits)
         result.co_changes = self._extract_co_changes(commits)
 
@@ -312,6 +314,102 @@ class GitAnalyzer:
                 ))
 
         return pitfalls
+
+    def _generalize_pitfalls(self, pitfalls: list[Pitfall]) -> list[PitfallPattern]:
+        """Cluster episode-level pitfalls into abstract patterns.
+
+        Groups pitfalls by keyword cluster (reusing _FAILURE_CATEGORIES)
+        and overlapping file directories.  For each group of 2+ episodes,
+        generates a template-based abstract pattern so that future queries
+        can match by concept, not just the original commit wording.
+        """
+        if len(pitfalls) < 2:
+            return []
+
+        # Cluster advice templates keyed by _FAILURE_CATEGORIES name
+        _CLUSTER_ADVICE: dict[str, str] = {
+            "null_handling": "Check for null/None values at system boundaries before use",
+            "type_error": "Validate types at interface boundaries; use type annotations",
+            "validation": "Validate inputs at entry points; fail fast on invalid data",
+            "parsing": "Handle malformed input gracefully; validate structure before access",
+            "auth": "Centralise auth checks; never trust client-supplied identity",
+            "config": "Validate config at startup; provide sensible defaults",
+            "state": "Thread state through parameters; avoid mutable singletons in concurrent code",
+            "boundary": "Test edge cases explicitly: zero, one, max, empty, overflow",
+        }
+
+        # Step 1: tag each pitfall with matching keyword clusters
+        pitfall_clusters: dict[str, list[Pitfall]] = defaultdict(list)
+        for pit in pitfalls:
+            text = f"{pit.description} {pit.how_to_prevent}".lower()
+            for cluster_name, regex in _FAILURE_CATEGORIES.items():
+                if regex.search(text):
+                    pitfall_clusters[cluster_name].append(pit)
+
+        # Step 2: for each cluster with 2+ episodes, generate a pattern
+        patterns: list[PitfallPattern] = []
+        for cluster_name, episodes in pitfall_clusters.items():
+            if len(episodes) < 2:
+                continue
+
+            # Collect metadata from episodes
+            all_files: list[str] = []
+            episode_ids: list[str] = []
+            severities: list[Severity] = []
+            categories: list[PitfallCategory] = []
+            episode_summaries: list[str] = []
+            for ep in episodes:
+                episode_ids.append(ep.id)
+                all_files.extend(ep.file_paths)
+                severities.append(ep.severity)
+                categories.append(ep.category)
+                episode_summaries.append(ep.description[:80])
+
+            # Unique directories from file paths
+            dirs = sorted({str(Path(f).parent) for f in all_files if f})
+            dir_str = ", ".join(dirs[:5]) or "multiple locations"
+
+            # Highest severity in the cluster
+            sev_order = [Severity.CRITICAL, Severity.HIGH, Severity.MEDIUM, Severity.LOW, Severity.INFO]
+            highest_sev = min(severities, key=lambda s: sev_order.index(s))
+
+            # Most common category
+            cat_counts = Counter(categories)
+            most_common_cat = cat_counts.most_common(1)[0][0]
+
+            # Template-based pattern text
+            cluster_label = cluster_name.replace("_", " ")
+            pattern_text = (
+                f"{cluster_label.title()} issues in {dir_str} — "
+                f"{len(episodes)} episodes detected"
+            )
+
+            # Prevention advice from template + episode summaries
+            advice = _CLUSTER_ADVICE.get(cluster_name, f"Review {cluster_label} patterns in this area")
+            summary_text = "; ".join(episode_summaries[:3])
+            how_to_prevent = (
+                f"Multiple {cluster_label} issues found: {summary_text}. "
+                f"Prevention: {advice}"
+            )
+
+            # Timestamps
+            first = min(ep.first_seen for ep in episodes)
+            last = max(ep.last_seen for ep in episodes)
+
+            patterns.append(PitfallPattern(
+                cluster_name=cluster_name,
+                pattern=pattern_text,
+                how_to_prevent=how_to_prevent,
+                category=most_common_cat,
+                severity=highest_sev,
+                episode_ids=episode_ids,
+                episode_count=len(episodes),
+                file_paths=sorted(set(all_files))[:20],
+                first_seen=first,
+                last_seen=last,
+            ))
+
+        return patterns
 
     def _extract_hot_files(self, commits: list[dict]) -> list[HotFile]:
         """Extract hot file metrics from commit history."""

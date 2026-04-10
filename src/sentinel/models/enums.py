@@ -19,6 +19,7 @@ class KnowledgeType(str, Enum):
     PITFALL = "pitfall"
     PATTERN = "pattern"
     SOLUTION = "solution"
+    PITFALL_PATTERN = "pitfall_pattern"
 
 
 class PitfallCategory(str, Enum):

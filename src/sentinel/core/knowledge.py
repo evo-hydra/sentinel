@@ -25,6 +25,7 @@ from sentinel.models.knowledge import (
     Feedback,
     HotFile,
     Pitfall,
+    PitfallPattern,
     Solution,
 )
 
@@ -45,7 +46,7 @@ def _safe_json_loads(raw: str | None, default: Any = None, context: str = "") ->
         return default if default is not None else []
 
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sentinel_meta (
@@ -392,6 +393,28 @@ def _migrate_v9_to_v10(conn: sqlite3.Connection) -> None:
     """)
 
 
+def _migrate_v10_to_v11(conn: sqlite3.Connection) -> None:
+    """Add pitfall_patterns table for generalized pitfall clusters."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS pitfall_patterns (
+            id             TEXT PRIMARY KEY,
+            cluster_name   TEXT NOT NULL DEFAULT '',
+            pattern        TEXT NOT NULL,
+            how_to_prevent TEXT NOT NULL DEFAULT '',
+            category       TEXT NOT NULL DEFAULT 'bug',
+            severity       TEXT NOT NULL DEFAULT 'medium',
+            episode_ids    TEXT NOT NULL DEFAULT '[]',
+            episode_count  INTEGER NOT NULL DEFAULT 0,
+            file_paths     TEXT NOT NULL DEFAULT '[]',
+            first_seen     TEXT NOT NULL,
+            last_seen      TEXT NOT NULL,
+            source         TEXT NOT NULL DEFAULT 'inferred'
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_pitfall_pattern_cluster
+            ON pitfall_patterns(cluster_name, pattern);
+    """)
+
+
 _MIGRATIONS: dict[int, Any] = {
     1: _migrate_v1_to_v2,
     2: _migrate_v2_to_v3,
@@ -402,6 +425,7 @@ _MIGRATIONS: dict[int, Any] = {
     7: _migrate_v7_to_v8,
     8: _migrate_v8_to_v9,
     9: _migrate_v9_to_v10,
+    10: _migrate_v10_to_v11,
 }
 
 
@@ -687,6 +711,93 @@ class KnowledgeStore:
             source=KnowledgeSource(row["source"]),
             file_paths=_safe_json_loads(row["file_paths"], default=[], context="pitfall.file_paths"),
         )
+
+    # --- Pitfall Patterns (generalized clusters) ---
+
+    def get_pitfall_patterns(
+        self,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[PitfallPattern]:
+        rows = self.conn.execute(
+            "SELECT * FROM pitfall_patterns ORDER BY episode_count DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+        return [self._row_to_pitfall_pattern(r) for r in rows]
+
+    def search_pitfall_patterns(self, query: str, limit: int = 5) -> list[PitfallPattern]:
+        """Search pitfall patterns via FTS5. Returns matches ranked by relevance."""
+        results: list[PitfallPattern] = []
+        try:
+            rows = self.conn.execute(
+                """SELECT pp.* FROM pitfall_patterns pp
+                   JOIN knowledge_fts fts ON fts.knowledge_id = pp.id
+                   WHERE knowledge_fts MATCH ? AND fts.knowledge_type = 'pitfall_pattern'
+                   ORDER BY rank LIMIT ?""",
+                (query, limit),
+            ).fetchall()
+            results = [self._row_to_pitfall_pattern(r) for r in rows]
+        except Exception:
+            pass
+        # Fallback: keyword LIKE search on pattern + how_to_prevent
+        if not results:
+            words = [w for w in query.split() if len(w) > 2]
+            if words:
+                conditions = " AND ".join(
+                    "(pattern LIKE ? OR how_to_prevent LIKE ?)" for _ in words
+                )
+                params: list[str] = []
+                for w in words:
+                    params.extend([f"%{w}%", f"%{w}%"])
+                params.append(str(limit))
+                rows = self.conn.execute(
+                    f"SELECT * FROM pitfall_patterns WHERE {conditions} "
+                    f"ORDER BY episode_count DESC LIMIT ?",
+                    params,
+                ).fetchall()
+                results = [self._row_to_pitfall_pattern(r) for r in rows]
+        return results
+
+    def _row_to_pitfall_pattern(self, row: sqlite3.Row) -> PitfallPattern:
+        return PitfallPattern(
+            id=row["id"],
+            cluster_name=row["cluster_name"],
+            pattern=row["pattern"],
+            how_to_prevent=row["how_to_prevent"],
+            category=PitfallCategory(row["category"]),
+            severity=Severity(row["severity"]),
+            episode_ids=_safe_json_loads(row["episode_ids"], default=[], context="pp.episode_ids"),
+            episode_count=row["episode_count"],
+            file_paths=_safe_json_loads(row["file_paths"], default=[], context="pp.file_paths"),
+            first_seen=row["first_seen"],
+            last_seen=row["last_seen"],
+            source=KnowledgeSource(row["source"]),
+        )
+
+    def _add_pitfall_pattern_no_commit(self, pp: PitfallPattern) -> None:
+        self.conn.execute(
+            """INSERT INTO pitfall_patterns
+            (id, cluster_name, pattern, how_to_prevent, category, severity,
+             episode_ids, episode_count, file_paths, first_seen, last_seen, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(cluster_name, pattern) DO UPDATE SET
+                how_to_prevent = CASE WHEN LENGTH(excluded.how_to_prevent) > LENGTH(how_to_prevent)
+                    THEN excluded.how_to_prevent ELSE how_to_prevent END,
+                severity = CASE
+                    WHEN instr('critical,high,medium,low,info', excluded.severity)
+                       < instr('critical,high,medium,low,info', severity)
+                    THEN excluded.severity ELSE severity END,
+                episode_ids = excluded.episode_ids,
+                episode_count = excluded.episode_count,
+                file_paths = excluded.file_paths,
+                last_seen = excluded.last_seen""",
+            (pp.id, pp.cluster_name, pp.pattern, pp.how_to_prevent,
+             pp.category.value, pp.severity.value,
+             json.dumps(pp.episode_ids), pp.episode_count,
+             json.dumps(pp.file_paths), pp.first_seen, pp.last_seen,
+             pp.source.value),
+        )
+        self._index_fts(pp.id, KnowledgeType.PITFALL_PATTERN, f"{pp.pattern} {pp.how_to_prevent}")
 
     # --- Patterns ---
 
@@ -1144,6 +1255,8 @@ class KnowledgeStore:
                 self._add_decision_no_commit(dec)
             for pit in results.pitfalls:
                 self._add_pitfall_no_commit(pit)
+            for pp in results.pitfall_patterns:
+                self._add_pitfall_pattern_no_commit(pp)
             for pat in results.patterns:
                 self._add_pattern_no_commit(pat)
             for hf in results.hot_files:

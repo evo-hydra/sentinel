@@ -69,6 +69,28 @@ class Pitfall:
 
 
 @dataclass
+class PitfallPattern:
+    """An abstract pattern generalised from 2+ episode-level pitfalls.
+
+    Pitfall episodes are tied to specific commits.  Patterns capture the
+    underlying theme (e.g. "concurrency hazards in request handlers") so
+    that future queries match by concept, not just wording.
+    """
+    id: str = field(default_factory=_uuid)
+    cluster_name: str = ""          # e.g. "concurrency", "validation"
+    pattern: str = ""               # Human-readable abstract description
+    how_to_prevent: str = ""        # Prevention guidance
+    category: PitfallCategory = PitfallCategory.BUG
+    severity: Severity = Severity.MEDIUM
+    episode_ids: list[str] = field(default_factory=list)
+    episode_count: int = 0
+    file_paths: list[str] = field(default_factory=list)
+    first_seen: str = field(default_factory=_now)
+    last_seen: str = field(default_factory=_now)
+    source: KnowledgeSource = KnowledgeSource.INFERRED
+
+
+@dataclass
 class CodePattern:
     """A recurring code pattern found in the repository."""
     id: str = field(default_factory=_uuid)
@@ -137,6 +159,7 @@ class AnalysisResult:
     conventions: list[Convention] = field(default_factory=list)
     decisions: list[Decision] = field(default_factory=list)
     pitfalls: list[Pitfall] = field(default_factory=list)
+    pitfall_patterns: list[PitfallPattern] = field(default_factory=list)
     patterns: list[CodePattern] = field(default_factory=list)
     hot_files: list[HotFile] = field(default_factory=list)
     co_changes: list[CoChange] = field(default_factory=list)

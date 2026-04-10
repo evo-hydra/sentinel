@@ -224,7 +224,18 @@ def create_server() -> FastMCP:
         try:
             pitfalls = store.get_pitfalls(limit=limit, offset=offset, file_path=file_path)
             total = store.count_pitfalls(file_path=file_path)
-            return format_pitfalls(pitfalls, total=total, offset=offset)
+            # Include generalized patterns (ranked higher)
+            patterns = store.get_pitfall_patterns(limit=5)
+            result = format_pitfalls(pitfalls, total=total, offset=offset)
+            if patterns:
+                pattern_lines = ["\n\n## Generalized Patterns\n"]
+                for pp in patterns:
+                    pattern_lines.append(
+                        f"- **{pp.pattern}** ({pp.episode_count} episodes, {pp.severity.value})\n"
+                        f"  Prevention: {pp.how_to_prevent[:200]}"
+                    )
+                result += "\n".join(pattern_lines)
+            return result
         finally:
             store.close()
 
@@ -380,7 +391,18 @@ def create_server() -> FastMCP:
             return _no_sentinel_msg()
         try:
             solutions = store.search_solutions(query, limit=limit)
-            return format_solutions(solutions, query=query)
+            # Also search generalized pitfall patterns (broader matches)
+            patterns = store.search_pitfall_patterns(query, limit=3)
+            result = format_solutions(solutions, query=query)
+            if patterns:
+                pattern_lines = ["\n\n### Pattern Matches\n"]
+                for pp in patterns:
+                    pattern_lines.append(
+                        f"- **{pp.pattern}** ({pp.episode_count} episodes)\n"
+                        f"  Prevention: {pp.how_to_prevent[:200]}"
+                    )
+                result += "\n".join(pattern_lines)
+            return result
         finally:
             store.close()
 
