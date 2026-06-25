@@ -107,6 +107,52 @@ def _semantic_query(
         return store.search(query, limit=limit, offset=offset)
 
 
+def _build_invariant(
+    rule: str,
+    code_pattern: str,
+    file_globs: list[str] | None,
+    severity: str,
+    how_to_prevent: str,
+) -> Pitfall:
+    """Validate inputs and build a hand-authored invariant Pitfall.
+
+    Raises ValueError with a user-facing message when the rule is empty, the
+    code_pattern is not a compilable regex, or the severity is unknown. Kept
+    module-level (separate from the MCP wrapper) so the validation logic can
+    be unit-tested directly, matching the codebase's thin-wrapper convention.
+    """
+    import re
+
+    from sentinel.models.enums import KnowledgeSource, PitfallCategory, Severity
+    from sentinel.models.knowledge import Pitfall
+
+    if not rule.strip():
+        raise ValueError("'rule' must be a non-empty imperative.")
+    if not code_pattern.strip():
+        raise ValueError("'code_pattern' regex trigger is required.")
+    try:
+        re.compile(code_pattern)
+    except re.error as exc:
+        raise ValueError(f"code_pattern is not a valid regex ({exc}).") from exc
+    try:
+        sev = Severity(severity.lower())
+    except ValueError:
+        raise ValueError(
+            f"unknown severity '{severity}'. Use one of: "
+            + ", ".join(s.value for s in Severity)
+        ) from None
+
+    return Pitfall(
+        category=PitfallCategory.BUG,
+        severity=sev,
+        description=rule,
+        code_pattern=code_pattern,
+        how_to_prevent=how_to_prevent,
+        source=KnowledgeSource.MANUAL,
+        file_paths=file_globs or [],
+    )
+
+
 def create_server() -> FastMCP:
     """Create and configure the MCP server with all tools registered."""
     if not HAS_MCP:
@@ -424,6 +470,52 @@ def create_server() -> FastMCP:
             if success:
                 return f"Solution {solution_id[:8]} marked as verified."
             return f"Solution {solution_id[:8]} not found."
+        finally:
+            store.close()
+
+    @mcp.tool()
+    def sentinel_invariant_save(
+        rule: str,
+        code_pattern: str,
+        file_globs: list[str] | None = None,
+        severity: str = "high",
+        how_to_prevent: str = "",
+        project_root: str = "",
+    ) -> str:
+        """Save a hand-authored invariant: a rule enforced against future diffs.
+
+        Unlike auto-mined pitfalls (which carry no code_pattern), an invariant
+        pairs an imperative rule with a regex trigger. Seraph's Tier 2 gate
+        matches the trigger against the added lines of a diff, so the rule
+        fires as a gate at commit time instead of waiting to be searched for.
+
+        Args:
+            rule: One-line imperative rule (stored as the pitfall description),
+                e.g. "Use parameterized queries — never f-string SQL".
+            code_pattern: Regex trigger tested against added diff lines,
+                e.g. r"execute\\(\\s*f[\"']".
+            file_globs: Optional path globs narrowing where the rule applies
+                (e.g. ["services/*.py"]). Empty = every changed file.
+            severity: One of critical/high/medium/low/info (default high).
+            how_to_prevent: Remediation shown when the invariant fires.
+            project_root: Explicit project path (use when CWD doesn't match project root)
+        """
+        try:
+            pitfall = _build_invariant(
+                rule, code_pattern, file_globs, severity, how_to_prevent,
+            )
+        except ValueError as exc:
+            return f"Invariant not saved: {exc}"
+
+        store = _open_store(project_root=project_root)
+        if store is None:
+            return _no_sentinel_msg()
+        try:
+            store.add_pitfall(pitfall)
+            return (
+                f"Invariant saved (id: {pitfall.id[:8]}, severity: {pitfall.severity.value}). "
+                f"Trigger: {code_pattern}"
+            )
         finally:
             store.close()
 

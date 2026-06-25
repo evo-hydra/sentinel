@@ -675,6 +675,20 @@ class KnowledgeStore:
         ).fetchall()
         return [self._row_to_pitfall(r) for r in rows]
 
+    def get_invariants(self) -> list[Pitfall]:
+        """Return all hand-authored invariants — pitfalls carrying a code_pattern.
+
+        Unlike get_pitfalls(), this is NOT frequency-ranked or limited: invariants
+        are a small, deliberately-authored set that must all be visible to the
+        diff gate regardless of how much auto-mined git-history noise surrounds
+        them (a frequency-limited fetch hides freshly-saved invariants in large
+        stores).
+        """
+        rows = self.conn.execute(
+            "SELECT * FROM pitfalls WHERE code_pattern IS NOT NULL AND code_pattern != ''"
+        ).fetchall()
+        return [self._row_to_pitfall(r) for r in rows]
+
     def count_pitfalls(
         self,
         category: PitfallCategory | None = None,

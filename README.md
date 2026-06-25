@@ -64,6 +64,7 @@ Sentinel exposes 8 tools via MCP (stdio transport, FastMCP). All read tools are 
 | `sentinel_hot_files` | Risk-ranked file table | Prioritizing review attention |
 | `sentinel_co_changes` | Co-change pairs for a file | Checking what else to update |
 | `sentinel_feedback` | Submit feedback on knowledge | After acting on a suggestion |
+| `sentinel_invariant_save` | Save a hand-authored invariant (rule + regex trigger) | When review surfaces a rule that should gate future diffs |
 
 ### Parameters
 
@@ -77,6 +78,9 @@ Sentinel exposes 8 tools via MCP (stdio transport, FastMCP). All read tools are 
 | `sentinel_hot_files` | (none) | |
 | `sentinel_co_changes` | `file_path: str`, `limit: int` (opt), `offset: int` (opt) | Relative path, e.g. `"src/auth.py"` |
 | `sentinel_feedback` | `knowledge_id: str`, `outcome: str`, `context: str` (optional) | ID from tool output, `"accepted"` / `"rejected"` / `"modified"` |
+| `sentinel_invariant_save` | `rule: str`, `code_pattern: str`, `file_globs: list[str]` (opt), `severity: str` (opt), `how_to_prevent: str` (opt) | `rule` = imperative; `code_pattern` = regex trigger; default `severity="high"` |
+
+**Invariant authoring (write):** `sentinel_invariant_save` persists a rule as a manual-source pitfall with a `code_pattern` regex trigger. Unlike auto-mined pitfalls (which never carry a `code_pattern`), invariants are matched against the **added lines of a diff** by Seraph's Tier 2 gate, so the rule fires at commit time instead of waiting to be searched for. The regex is validated before saving — an uncompilable pattern is rejected with no row written.
 
 **Pagination:** Tools that accept `limit`/`offset` append a footer when more results are available:
 
